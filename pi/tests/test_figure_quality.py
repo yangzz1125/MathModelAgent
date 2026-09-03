@@ -237,6 +237,7 @@ class FigureStackTest(unittest.TestCase):
                 "preview_path": "figures/q1/value.png",
                 "generator_path": "code/q1/plot.py",
                 "data_paths": ["results/q1/sensitivity.csv"],
+                "required_data_fields": ["F", "V"],
             }],
         }
         verification = {
@@ -250,6 +251,7 @@ class FigureStackTest(unittest.TestCase):
                 "plot_family": "sensitivity-line",
                 "generator_path": "code/q1/plot.py",
                 "data_paths": ["results/q1/sensitivity.csv"],
+                "required_data_fields": ["F", "V"],
                 "style_stack": [*DEFAULT_STYLE_STACK, "matplotlib"],
                 "language": "Chinese",
                 "checks": sorted(REQUIRED_CHECKS),
@@ -276,9 +278,9 @@ class FigureStackTest(unittest.TestCase):
                 self.assertEqual(image.size, (295, 295))
             self.assertGreater(script.stat().st_size, 100)
 
-    def test_reference_catalog_contains_30_readable_non_evidence_previews(self) -> None:
+    def test_reference_catalog_contains_31_readable_non_evidence_previews(self) -> None:
         catalog = figure_reference_catalog()
-        self.assertEqual(len(catalog), 30)
+        self.assertEqual(len(catalog), 31)
         for reference in catalog.values():
             self.assertFalse(reference["evidence_eligible"])
             preview = Path(__file__).resolve().parents[2] / reference["preview_path"]
@@ -303,6 +305,14 @@ class FigureStackTest(unittest.TestCase):
                 "figure_protocol: invalid plan figure_specs: q1.figure_specs[0] artifact is not declared in outputs: code/q1/plot.py",
                 figure_evidence_errors(root, problem, verification),
             )
+
+            problem["outputs"].append("code/q1/plot.py")
+            problem["figure_specs"][0]["required_data_fields"] = ["missing_field"]  # type: ignore[index]
+            verification["figures"][0]["required_data_fields"] = ["missing_field"]  # type: ignore[index]
+            self.assertTrue(any(
+                "required data fields absent" in error
+                for error in figure_evidence_errors(root, problem, verification)
+            ))
 
     def test_specialized_template_id_must_come_from_existing_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

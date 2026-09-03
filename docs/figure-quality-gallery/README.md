@@ -16,8 +16,9 @@
 | 箱线与原始点 | [`boxplot.png`](boxplot.png) | [`PDF`](boxplot.pdf) · [`SVG`](boxplot.svg) |
 | 气泡散点 | [`bubble_scatter.png`](bubble_scatter.png) | [`PDF`](bubble_scatter.pdf) · [`SVG`](bubble_scatter.svg) |
 | 堆叠面积 | [`stacked_area.png`](stacked_area.png) | [`PDF`](stacked_area.pdf) · [`SVG`](stacked_area.svg) |
+| 首次事件括号 | [`event_threshold_bracket.png`](event_threshold_bracket.png) | [`PDF`](event_threshold_bracket.pdf) · [`SVG`](event_threshold_bracket.svg) |
 
-生成脚本：[`render_basic_gallery.py`](render_basic_gallery.py)。数据为确定性视觉回归 fixture，仅用于测试布局、中文字体、矢量导出和灰度可辨识性。
+生成脚本：[`render_basic_gallery.py`](render_basic_gallery.py) 和 [`render_event_reference.py`](render_event_reference.py)。数据为确定性视觉回归 fixture，仅用于测试布局、中文字体、矢量导出和灰度可辨识性。
 
 ## 既有图
 

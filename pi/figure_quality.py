@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -45,6 +46,7 @@ FIGURE_FIELDS = {
     "plot_family",
     "generator_path",
     "data_paths",
+    "required_data_fields",
     "style_stack",
     "language",
     "checks",
@@ -64,6 +66,7 @@ FIGURE_SPEC_FIELDS = {
     "preview_path",
     "generator_path",
     "data_paths",
+    "required_data_fields",
 }
 REFERENCE_FIELDS = {
     "id",
@@ -150,8 +153,8 @@ def figure_reference_catalog() -> dict[str, dict[str, Any]]:
             "structure": _text(item["structure"], f"{label}.structure"),
         }
         catalog[reference_id] = normalized
-    if len(catalog) != 30:
-        raise ValueError(f"reference catalog must contain 30 entries, got {len(catalog)}")
+    if len(catalog) != 31:
+        raise ValueError(f"reference catalog must contain 31 entries, got {len(catalog)}")
     return catalog
 
 
@@ -223,6 +226,11 @@ def validate_figure_specs(problem: dict[str, Any]) -> list[dict[str, Any]]:
             _relative(path, f"{label}.data_paths[]")
             for path in _text_list(item["data_paths"], f"{label}.data_paths")
         ]
+        required_data_fields = _text_list(
+            item["required_data_fields"], f"{label}.required_data_fields"
+        )
+        if len(set(required_data_fields)) != len(required_data_fields):
+            raise ValueError(f"{label}.required_data_fields contains duplicates")
         if not vector.startswith(f"figures/{problem_id}/") or Path(vector).suffix.lower() not in {".pdf", ".svg"}:
             raise ValueError(f"{label}.vector_path must be PDF/SVG under figures/{problem_id}/")
         if not preview.startswith(f"figures/{problem_id}/") or Path(preview).suffix.lower() != ".png":
@@ -255,6 +263,7 @@ def validate_figure_specs(problem: dict[str, Any]) -> list[dict[str, Any]]:
             "preview_path": preview,
             "generator_path": generator,
             "data_paths": data_paths,
+            "required_data_fields": required_data_fields,
         })
     return normalized
 
@@ -304,6 +313,31 @@ def _allowed_data(path: str, problem: dict[str, Any]) -> bool:
         if path == declared or path.startswith(declared.rstrip("/") + "/"):
             return True
     return False
+
+
+def _structured_data_fields(workspace: Path, paths: list[str]) -> set[str]:
+    fields: set[str] = set()
+    for path in paths:
+        artifact = workspace / path
+        if not artifact.is_file():
+            continue
+        try:
+            if artifact.suffix.lower() == ".csv":
+                with artifact.open(newline="", encoding="utf-8-sig") as source:
+                    fields.update(csv.DictReader(source).fieldnames or ())
+            elif artifact.suffix.lower() == ".json":
+                value = json.loads(artifact.read_text(encoding="utf-8"))
+                pending = [value]
+                while pending:
+                    current = pending.pop()
+                    if isinstance(current, dict):
+                        fields.update(str(key) for key in current)
+                        pending.extend(current.values())
+                    elif isinstance(current, list):
+                        pending.extend(current)
+        except (OSError, UnicodeError, json.JSONDecodeError, csv.Error):
+            continue
+    return fields
 
 
 def _artifact_error(workspace: Path, path: str, kind: str) -> str | None:
@@ -379,6 +413,9 @@ def figure_evidence_errors(
                 _relative(path, f"{label}.data_paths[]")
                 for path in _text_list(raw["data_paths"], f"{label}.data_paths")
             ]
+            required_data_fields = _text_list(
+                raw["required_data_fields"], f"{label}.required_data_fields"
+            )
             claim_ids = _text_list(raw["claim_ids"], f"{label}.claim_ids")
             purpose = _text(raw["purpose"], f"{label}.purpose")
             plot_family = _text(raw["plot_family"], f"{label}.plot_family")
@@ -406,6 +443,7 @@ def figure_evidence_errors(
                 "preview_path": preview,
                 "generator_path": generator,
                 "data_paths": data_paths,
+                "required_data_fields": required_data_fields,
             }
             for field, actual in expected_values.items():
                 planned_field = "id" if field == "spec_id" else field
@@ -447,6 +485,12 @@ def figure_evidence_errors(
                 errors.append(f"figure_protocol: undeclared or cross-problem figure data: {path}")
             elif not (workspace / path).is_file():
                 errors.append(f"figure_protocol: figure data missing: {path}")
+        available_fields = _structured_data_fields(workspace, data_paths)
+        missing_fields = sorted(set(required_data_fields) - available_fields)
+        if missing_fields:
+            errors.append(
+                f"figure_protocol: required data fields absent from structured sources: {missing_fields}"
+            )
         specialized = [
             style.split(":", 1)[1]
             for style in style_stack

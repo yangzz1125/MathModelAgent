@@ -86,7 +86,7 @@ Nature 样式：
 - `verification.json.figures`：数据和生成谱系；
 - Scientific Review + Document Verification：语义和最终尺寸视觉验收。
 
-新增的不是另一套绘图库，而是成熟 pattern。运行时使用的 30 项本地参考目录位于 [`pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json`](../../pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json)，所有条目均显式标为 `evidence_eligible=false`：
+新增的不是另一套绘图库，而是成熟 pattern。运行时使用的 31 项本地参考目录位于 [`pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json`](../../pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json)，所有条目均显式标为 `evidence_eligible=false`：
 
 - 排名图：排序、直接数值、单一强调色；
 - 分布图：密度/箱线 + 原始点 + 中位数；

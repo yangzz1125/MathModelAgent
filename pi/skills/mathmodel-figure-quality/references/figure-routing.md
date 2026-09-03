@@ -5,6 +5,7 @@ Choose by the scientific question, not by appearance.
 | Scientific purpose | Preferred API/layout | Required evidence | Avoid |
 | --- | --- | --- | --- |
 | Parameter sensitivity, time trend, convergence | `sns.lineplot` or `Axes.plot`; `fill_between` for a defined interval | x/y table, interval definition, stopping point or threshold when claimed | smooth interpolation unsupported by the model |
+| First event, contact, threshold crossing | `event-01-threshold-bracket`; bound curves plus explicit threshold and bracket | certified safe prefix, finite event witness, lower/upper bound fields, event bracket and certificate id | sensitivity-line reference, samples without conservative bounds, unbounded search horizon |
 | Compare methods/scenarios | `sns.barplot` with defined error bars, or point plot when zero baseline is irrelevant | category values, statistic, error definition and sample size | truncated bar baseline, 3D bars |
 | Relationship and fit | `sns.scatterplot` plus `sns.regplot`, or identity line for predicted-vs-actual | individual observations, fit method, test-set distinction | hiding points behind an opaque fit line |
 | Distribution | `sns.histplot`, `sns.ecdfplot`, `sns.boxplot`, `sns.violinplot` plus points when affordable | observations, group definition, bandwidth/normalization when used | decorative density without sample size |

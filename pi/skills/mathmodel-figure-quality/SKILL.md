@@ -91,6 +91,7 @@ Default-disabled: pie/donut, 3D bars, radar, dual-y axes, rainbow/jet colormaps,
   "plot_family": "parametric-line",
   "generator_path": "code/q1/plot_value.py",
   "data_paths": ["results/q1/sensitivity.csv"],
+  "required_data_fields": ["capacity", "objective", "regime", "certificate_id"],
   "style_stack": ["science", "no-latex", "bright", "matplotlib"],
   "language": "Chinese",
   "checks": [
@@ -106,11 +107,11 @@ Default-disabled: pie/donut, 3D bars, radar, dual-y axes, rainbow/jet colormaps,
 
 For a specialized catalog layout add `specialized:<template-id>` to `style_stack`. Copy only structure/code ideas into the current problem generator; do not emit paths under the Skill or a `*_replica` artifact.
 
-`spec_id`, `reference_id`, claims, purpose, plot family, generator, data, vector, and preview must exactly match the Planner-owned `figure_specs` entry. The Host rejects substitutions even when the replacement looks better.
+`spec_id`, `reference_id`, claims, purpose, plot family, generator, data, required data fields, vector, and preview must exactly match the Planner-owned `figure_specs` entry. The Host reads CSV headers and JSON keys and rejects a figure when any `required_data_fields` value is absent. The Host also rejects substitutions even when the replacement looks better.
 
 ## Reference selection
 
-Read `references/figure-reference-catalog.json` and its selected preview before drawing. It contains 30 curated structures across trend, comparison, distribution, relationship, matrix/evaluation, and narrative multi-panel families. Every catalog preview has `evidence_eligible=false`: it is a visual layout reference, never source data or scientific evidence.
+Read `references/figure-reference-catalog.json` and its selected preview before drawing. It contains 31 curated structures across trend, event, comparison, distribution, relationship, matrix/evaluation, and narrative multi-panel families. Every catalog preview has `evidence_eligible=false`: it is a visual layout reference, never source data or scientific evidence.
 
 The Planner selects the reference. The Worker may preserve its panel organization, hierarchy, direct-label pattern, baseline treatment, and redundant encodings, but must replace all values and scientific text with current workspace evidence. If the selected reference is scientifically inappropriate, do not silently switch it; produce no candidate and report the plan defect so it can be replanned.
 

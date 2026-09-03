@@ -11,7 +11,7 @@
 - Schema-v2 Planning → Plan Audit → Candidate → Scientific Review → Paper Planning → Diagram → Writing → Document Verification。
 - Host-only acceptance、严格 Reviewer JSON、受控重规划、修复预算、阶段边界、SHA-256 冻结和重启恢复。
 - `figure_specs`：Planner 预先声明 claim、目的、图型、reference、面板、编码、注释、尺寸和产物路径。
-- 30 项正式绘图参考，其中 12 项来自 Seaborn 官方 gallery；所有参考图均为 `evidence_eligible=false`。
+- 31 项正式绘图参考，其中 12 项来自 Seaborn 官方 gallery，1 项专门表达首次事件认证括号；所有参考图均为 `evidence_eligible=false`。
 - 图表真实数据、生成器、矢量母版、PNG 预览、灰度和最终尺寸检查。
 - claim/evidence 驱动的论文规划、manifest、引用检查、版面检查和 Document Verification。
 
@@ -34,7 +34,7 @@
 - `vue-tsc -b && vite build`：通过，2427 modules transformed。
 - `git diff --check`：通过，仅有既有 LF/CRLF 提示。
 - Secret pattern scan：未发现 `sk-...` 密钥。
-- 30 项 reference catalog：全部可读取，12 个 `network-*` 项已注册。
+- 31 项 reference catalog：全部可读取，12 个 `network-*` 项和 1 个 event-threshold 项已注册。
 
 ## 当前环境
 

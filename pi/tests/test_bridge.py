@@ -47,6 +47,7 @@ from pi.staged_workflow import (
     expand_problem_phases,
     frozen_errors,
     initial_workflow,
+    plan_revision_prompt,
     result_errors,
     stage_scope_errors,
     validate_execution_plan,
@@ -518,6 +519,12 @@ class BridgeHelpersTest(unittest.TestCase):
         ):
             with self.subTest(path=unsafe), self.assertRaises(HTTPException):
                 _upload_path(unsafe, "A题")
+
+    def test_plan_revision_prompt_contains_audit_without_tool_artifacts(self) -> None:
+        prompt = plan_revision_prompt({"issues": ["finite event witness missing"]})
+        self.assertIn("finite event witness missing", prompt)
+        self.assertIn("cheapest scientifically honest repair", prompt)
+        self.assertNotIn("oldText", prompt)
 
     def test_protocol_text_excludes_hidden_thinking(self) -> None:
         content = [

@@ -360,6 +360,18 @@
       "structure": "Deliberately sorted horizontal totals and components with a stated denominator and direct differences.",
       "specialized_template_id": null,
       "evidence_eligible": false
+    },
+    {
+      "id": "event-01-threshold-bracket",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/previews/event-01-threshold-bracket.png",
+      "source_url": "project-generated from the event-evidence pattern",
+      "license": "Project-generated preview",
+      "plot_family": "event-threshold-bracket",
+      "appropriate_for": "A first event, contact, threshold crossing, or stopping time with a certified safe prefix and a finite event bracket.",
+      "avoid_when": "Only sampled values exist, no finite event witness is known, or the prior interval has not been conservatively excluded.",
+      "structure": "Certified lower and upper bounds, explicit zero threshold, shaded event bracket, event witness, and a direct annotation that earlier intervals were excluded.",
+      "specialized_template_id": null,
+      "evidence_eligible": false
     }
   ]
 }
