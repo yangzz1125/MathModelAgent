@@ -465,6 +465,11 @@ class StagedWorkflowContractTest(unittest.TestCase):
             self.assertEqual(result_errors(workspace, problem), [])
             frozen = {"q1": artifact_hashes(workspace, "q1")}
             self.assertEqual(frozen_errors(workspace, frozen), [])
+            cache = code / "__pycache__"
+            cache.mkdir()
+            (cache / "solve.cpython-311.pyc").write_bytes(b"transient bytecode")
+            self.assertEqual(frozen_errors(workspace, frozen), [])
+            self.assertNotIn("code/q1/__pycache__/solve.cpython-311.pyc", workspace_hashes(workspace))
             (code / "solve.py").write_text("print(2)\n", encoding="utf-8")
             self.assertEqual(frozen_errors(workspace, frozen), [
                 "artifact_changed: frozen artifacts for q1"

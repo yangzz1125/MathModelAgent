@@ -323,6 +323,10 @@ def _read_json(path: Path, errors: list[str], label: str) -> dict[str, Any] | No
     return value
 
 
+def _transient_python_artifact(path: Path) -> bool:
+    return "__pycache__" in path.parts or path.suffix.lower() in {".pyc", ".pyo"}
+
+
 def artifact_hashes(workspace: Path, problem_id: str) -> dict[str, str]:
     roots = (
         workspace / "code" / problem_id,
@@ -335,7 +339,7 @@ def artifact_hashes(workspace: Path, problem_id: str) -> dict[str, str]:
     for root in roots:
         paths = [root] if root.is_file() else sorted(root.rglob("*")) if root.is_dir() else []
         for path in paths:
-            if path.is_file():
+            if path.is_file() and not _transient_python_artifact(path):
                 relative = path.relative_to(workspace).as_posix()
                 hashes[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashes
@@ -356,7 +360,7 @@ def frozen_errors(workspace: Path, frozen: dict[str, Any]) -> list[str]:
 def workspace_hashes(workspace: Path) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for path in sorted(workspace.rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or _transient_python_artifact(path):
             continue
         relative = path.relative_to(workspace)
         if relative.parts[0].startswith(".pi") or relative.as_posix() == "project.json":

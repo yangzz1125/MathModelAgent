@@ -1,4 +1,5 @@
 import request from "@/utils/request";
+import axios from "axios";
 
 export interface ProjectSummary {
 	project_id: string;
@@ -23,6 +24,14 @@ export interface StartProjectOptions {
 	planner_thinking: string;
 	worker_model: string;
 	worker_thinking: string;
+}
+
+export function requestErrorDetail(error: unknown, fallback: string) {
+	if (axios.isAxiosError(error)) {
+		const detail = error.response?.data?.detail;
+		if (typeof detail === "string" && detail.trim()) return detail;
+	}
+	return fallback;
 }
 
 /** Copy selected files into a standardized workspace without starting Pi. */

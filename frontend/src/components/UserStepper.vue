@@ -4,6 +4,7 @@ import {
 	type ProjectSummary,
 	discardProject,
 	initializeProject,
+	requestErrorDetail,
 	startProject,
 } from "@/apis/submitModelingApi";
 import { Button } from "@/components/ui/button";
@@ -170,7 +171,10 @@ async function initialize() {
 		console.error("初始化项目失败:", error);
 		toast({
 			title: "初始化失败",
-			description: "请检查文件路径、文件大小和 bridge 状态",
+			description: requestErrorDetail(
+				error,
+				"请检查文件路径、文件大小和 bridge 状态",
+			),
 			variant: "destructive",
 		});
 	} finally {
@@ -224,7 +228,10 @@ async function start() {
 		console.error("启动 Pi 失败:", error);
 		toast({
 			title: "启动失败",
-			description: "项目仍处于已初始化状态，可以修正配置后重试",
+			description: requestErrorDetail(
+				error,
+				"项目仍处于已初始化状态，可以修正配置后重试",
+			),
 			variant: "destructive",
 		});
 	} finally {
