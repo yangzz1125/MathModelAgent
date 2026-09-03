@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { saveApiConfig } from "@/apis/apiKeyApi";
-import { submitModelingTask } from "@/apis/submitModelingApi";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { getPiModels } from "@/apis/commonApi";
+import {
+	type ProjectSummary,
+	discardProject,
+	initializeProject,
+	startProject,
+} from "@/apis/submitModelingApi";
 import { Button } from "@/components/ui/button";
 import {
 	Select,
@@ -14,261 +18,381 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/toast";
-import { useApiKeyStore } from "@/stores/apiKeys";
 import { useTaskStore } from "@/stores/task";
-import { FileUp } from "lucide-vue-next";
-import { Rocket } from "lucide-vue-next";
-import { ref } from "vue";
+import {
+	Database,
+	FileArchive,
+	FileText,
+	FolderOpen,
+	LoaderCircle,
+	Upload,
+} from "lucide-vue-next";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import type FileConfirmDialog from "./FileConfirmDialog.vue";
 
-// ---- Reactive State ----
-
-const taskStore = useTaskStore();
-const { toast } = useToast();
-const apiKeyStore = useApiKeyStore();
-const currentStep = ref(1);
-const fileConfirmDialog = ref<InstanceType<typeof FileConfirmDialog> | null>(
-	null,
-);
-const fileUploaded = ref(true);
-
-/** 已上传的文件列表 */
-const uploadedFiles = ref<File[]>([]);
-
-/** 题目内容 */
-const question = ref("");
-
-/** 选项配置 */
-const selectedOptions = ref({
-	template: "国赛",
-	language: "中文",
-	format: "Markdown",
-});
-
-/** 选择器配置列表 */
-const selectConfig = [
-	{
-		key: "模板",
-		label: "选择模板",
-		options: ["国赛", "美赛"],
-	},
-	{
-		key: "语言",
-		label: "选择语言",
-		options: ["中文", "英文"],
-	},
-	{
-		key: "格式",
-		label: "选择格式",
-		options: ["Markdown", "LaTeX"],
-	},
-];
-
-/** 上传成功提示显示状态 */
-const showUploadSuccess = ref(false);
-
-/** 提交成功提示显示状态 */
-const showSubmitSuccess = ref(false);
-
-/** 任务ID */
-const taskId = ref<string | null>(null);
-
-/** 文件输入元素引用 */
-const fileInput = ref<HTMLInputElement | null>(null);
-
-// ---- Methods ----
-
-const nextStep = () => {
-	if (currentStep.value < 2) currentStep.value++;
-};
-
-const prevStep = () => {
-	if (currentStep.value > 1) currentStep.value--;
-};
-
-/** 处理文件上传事件 */
-const handleFileUpload = (event: Event) => {
-	const input = event.target as HTMLInputElement;
-	if (input.files && input.files.length > 0) {
-		uploadedFiles.value = Array.from(input.files);
-		fileUploaded.value = true;
-		showUploadSuccess.value = true; // 显示提示
-		setTimeout(() => {
-			showUploadSuccess.value = false; // 3秒后自动隐藏
-		}, 1000);
-	}
-};
+// ---- State ----
 
 const router = useRouter();
+const taskStore = useTaskStore();
+const { toast } = useToast();
+const step = ref<"import" | "ready">("import");
+const importMode = ref<"folder" | "files">("folder");
+const selectedFiles = ref<File[]>([]);
+const sourceFolder = ref("");
+const project = ref<ProjectSummary | null>(null);
+const notes = ref("");
+const folderInput = ref<HTMLInputElement | null>(null);
+const filesInput = ref<HTMLInputElement | null>(null);
+const initializing = ref(false);
+const starting = ref(false);
+const modelsLoading = ref(true);
+const models = ref<Awaited<ReturnType<typeof getPiModels>>["data"]["models"]>(
+	[],
+);
+const thinkingLevels = ref<string[]>([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
 
-/** 提交建模任务 */
-const handleSubmit = async () => {
+const options = ref({
+	competition: "CUMCM",
+	language: "Chinese",
+	paperEngine: "LaTeX",
+	unifiedModel: false,
+	plannerModel: "",
+	plannerThinking: "high",
+	workerModel: "",
+	workerThinking: "high",
+	problemFile: "",
+});
+
+function supportsThinking(modelId: string) {
+	return models.value.find((item) => item.id === modelId)?.thinking ?? true;
+}
+
+const plannerSupportsThinking = computed(() =>
+	supportsThinking(options.value.plannerModel),
+);
+const workerSupportsThinking = computed(() =>
+	supportsThinking(options.value.workerModel),
+);
+
+const formattedSize = computed(() => {
+	const bytes = project.value?.total_bytes ?? 0;
+	return bytes < 1024 * 1024
+		? `${(bytes / 1024).toFixed(1)} KB`
+		: `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+});
+
+// ---- Lifecycle ----
+
+onMounted(async () => {
 	try {
-		if (apiKeyStore.isEmpty) {
-			toast({
-				title: "请先配置 API Key",
-				description: "在侧边栏 -> 头像 -> API Key 中配置 API Key",
-				variant: "destructive",
-			});
-			return;
-		}
-
-		// 保存 API Key
-		await saveApiConfig({
-			coordinator: apiKeyStore.coordinatorConfig,
-			modeler: apiKeyStore.modelerConfig,
-			coder: apiKeyStore.coderConfig,
-			writer: apiKeyStore.writerConfig,
-			openalex_email: apiKeyStore.openalexEmail,
-		});
-
-		if (uploadedFiles.value.length === 0) {
-			if (!fileConfirmDialog.value) return;
-
-			const shouldContinue = await fileConfirmDialog.value.openConfirmDialog();
-
-			if (!shouldContinue) {
-				toast({
-					title: "请先上传文件",
-					description: "请先上传文件",
-					variant: "destructive",
-				});
-				return;
-			}
-		}
-		console.log(selectedOptions.value);
-		console.log(question.value);
-		console.log(uploadedFiles.value);
-		const response = await submitModelingTask(
-			{
-				ques_all: question.value,
-				comp_template: selectedOptions.value.template,
-				format_output: selectedOptions.value.format,
-			},
-			uploadedFiles.value,
-		);
-
-		taskId.value = response?.data?.task_id ?? null;
-		taskStore.addUserMessage(question.value);
-
-		showSubmitSuccess.value = true;
-		setTimeout(() => {
-			showSubmitSuccess.value = false; // 3秒后自动隐藏
-		}, 3000);
-		router.push(`/task/${taskId.value}`);
-		toast({
-			title: "任务提交成功",
-			description: `任务提交成功，编号为：${taskId.value}`,
-		});
+		const { data } = await getPiModels();
+		models.value = data.models;
+		thinkingLevels.value = data.thinking_levels;
+		const fallback = data.default_model || data.models[0]?.id || "";
+		options.value.plannerModel =
+			data.models.find((item) => item.id === "openai/gpt-5.6-sol")?.id ||
+			fallback;
+		options.value.workerModel =
+			data.models.find((item) => item.id === "openai/gpt-5.6-luna")?.id ||
+			fallback;
+		options.value.plannerThinking = data.default_thinking || "high";
+		options.value.workerThinking = data.default_thinking || "high";
 	} catch (error) {
-		console.error("任务提交失败:", error);
+		console.error("读取 Pi 模型列表失败:", error);
 		toast({
-			title: "任务提交失败",
-			description: "请检查 API Key 是否正确",
+			title: "模型列表读取失败",
+			description: "将使用 Pi 当前默认模型",
 			variant: "destructive",
 		});
+	} finally {
+		modelsLoading.value = false;
 	}
-};
+});
+
+watch(
+	() => options.value.plannerModel,
+	() => {
+		if (!plannerSupportsThinking.value) options.value.plannerThinking = "off";
+		if (options.value.unifiedModel)
+			options.value.workerModel = options.value.plannerModel;
+	},
+);
+watch(
+	() => options.value.workerModel,
+	() => {
+		if (!workerSupportsThinking.value) options.value.workerThinking = "off";
+	},
+);
+watch(
+	() => options.value.unifiedModel,
+	(unified) => {
+		if (unified) {
+			options.value.workerModel = options.value.plannerModel;
+			options.value.workerThinking = options.value.plannerThinking;
+		}
+	},
+);
+
+// ---- Actions ----
+
+function chooseFiles(event: Event) {
+	const input = event.target as HTMLInputElement;
+	selectedFiles.value = Array.from(input.files ?? []);
+	const firstPath = selectedFiles.value[0]?.webkitRelativePath;
+	sourceFolder.value = firstPath?.split("/")[0] ?? "";
+}
+
+async function initialize() {
+	if (!selectedFiles.value.length) {
+		toast({
+			title: "请选择赛题",
+			description: "选择官方赛题文件夹，或切换到散文件导入",
+			variant: "destructive",
+		});
+		return;
+	}
+	initializing.value = true;
+	try {
+		project.value = (
+			await initializeProject("", selectedFiles.value, sourceFolder.value)
+		).data;
+		options.value.problemFile = project.value.problem_file;
+		step.value = "ready";
+	} catch (error) {
+		console.error("初始化项目失败:", error);
+		toast({
+			title: "初始化失败",
+			description: "请检查文件路径、文件大小和 bridge 状态",
+			variant: "destructive",
+		});
+	} finally {
+		initializing.value = false;
+	}
+}
+
+async function resetImport() {
+	if (project.value) {
+		try {
+			await discardProject(project.value.project_id);
+		} catch (error) {
+			console.error("删除未启动项目失败:", error);
+		}
+	}
+	project.value = null;
+	selectedFiles.value = [];
+	sourceFolder.value = "";
+	step.value = "import";
+}
+
+async function start() {
+	if (!project.value || !options.value.problemFile) {
+		toast({
+			title: "未识别主题目",
+			description: "请从候选文件中选择主题目",
+			variant: "destructive",
+		});
+		return;
+	}
+	starting.value = true;
+	try {
+		const response = await startProject(project.value.project_id, {
+			question: notes.value,
+			problem_file: options.value.problemFile,
+			competition: options.value.competition,
+			language: options.value.language,
+			paper_engine: options.value.paperEngine,
+			planner_model: options.value.plannerModel,
+			planner_thinking: options.value.plannerThinking,
+			worker_model: options.value.unifiedModel
+				? options.value.plannerModel
+				: options.value.workerModel,
+			worker_thinking: options.value.unifiedModel
+				? options.value.plannerThinking
+				: options.value.workerThinking,
+		});
+		taskStore.setCurrentTask(response.data.task_id);
+		await router.push(`/task/${response.data.task_id}`);
+	} catch (error) {
+		console.error("启动 Pi 失败:", error);
+		toast({
+			title: "启动失败",
+			description: "项目仍处于已初始化状态，可以修正配置后重试",
+			variant: "destructive",
+		});
+	} finally {
+		starting.value = false;
+	}
+}
 </script>
 
 <template>
-  <div class="w-full max-w-xl mx-auto relative">
-    <!-- 使用 Alert 组件 -->
-    <Transition name="fade">
-      <div v-if="showUploadSuccess" class="fixed top-4 right-4 z-50">
-        <Alert>
-          <Rocket class="h-4 w-4" />
-          <AlertTitle>文件上传成功！</AlertTitle>
-          <AlertDescription>
-            已成功上传 {{ uploadedFiles.length }} 个文件，请继续下一步操作。
-          </AlertDescription>
-        </Alert>
-      </div>
-    </Transition>
-
-    <Transition name="fade">
-      <div v-if="showSubmitSuccess" class="fixed top-4 right-4 z-50">
-        <Alert>
-          <Rocket class="h-4 w-4" />
-          <AlertTitle>任务提交成功！</AlertTitle>
-          <AlertDescription>
-            任务提交成功，编号为：{{ taskId }}。
-          </AlertDescription>
-        </Alert>
-      </div>
-    </Transition>
-
-    <div class="border rounded-lg shadow-sm">
-      <!-- Step 1: File Upload -->
-      <div v-if="currentStep === 1" class="p-6">
-        <div
-          class="border-2 border-dashed rounded-lg p-8 text-center hover:border-primary/50 transition-colors cursor-pointer"
-          @click="() => fileInput?.click()">
-          <input type="file" ref="fileInput" class="hidden" @change="handleFileUpload" accept=".txt,.csv,.xlsx"
-            multiple>
-          <div class="mx-auto w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
-            <FileUp class="w-6 h-6 text-primary" />
-          </div>
-          <div>
-            <p class="text-lg font-medium">拖拽数据集到此处或点击上传</p>
-            <p class="text-sm text-muted-foreground mt-1">
-              支持 .txt, .csv, .xlsx 等格式文件（可多选）
-            </p>
-            <div v-if="uploadedFiles.length > 0" class="text-sm text-green-600 mt-1">
-              已上传文件:
-              <ul>
-                <li v-for="(file, index) in uploadedFiles" :key="index">
-                  {{ file.name }}
-                </li>
-              </ul>
-            </div>
-          </div>
+  <div class="relative mx-auto w-full max-w-2xl">
+    <section class="border bg-white shadow-sm">
+      <div v-if="step === 'import'" class="p-6">
+        <div class="mb-5 flex rounded-md bg-gray-100 p-1">
+          <button type="button" class="flex-1 px-3 py-2 text-sm" :class="{
+            'bg-white font-medium shadow-sm': importMode === 'folder',
+            'text-gray-500': importMode !== 'folder',
+          }" @click="importMode = 'folder'">
+            赛题文件夹
+          </button>
+          <button type="button" class="flex-1 px-3 py-2 text-sm" :class="{
+            'bg-white font-medium shadow-sm': importMode === 'files',
+            'text-gray-500': importMode !== 'files',
+          }" @click="importMode = 'files'">
+            散文件
+          </button>
         </div>
-        <div class="mt-4 flex justify-end">
-          <Button :disabled="!fileUploaded" @click="nextStep" size="sm">
-            下一步
+
+        <button type="button"
+          class="flex min-h-48 w-full flex-col items-center justify-center border-2 border-dashed p-8 text-center transition-colors hover:border-primary/50"
+          @click="importMode === 'folder' ? folderInput?.click() : filesInput?.click()">
+          <FolderOpen v-if="importMode === 'folder'" class="mb-4 h-8 w-8 text-primary" />
+          <Upload v-else class="mb-4 h-8 w-8 text-primary" />
+          <span class="text-lg font-medium">
+            {{ importMode === 'folder' ? '选择官方赛题文件夹' : '选择题目和附件' }}
+          </span>
+          <span class="mt-2 text-sm text-gray-500">
+            {{ selectedFiles.length ? `已选择 ${selectedFiles.length} 个文件` : 'PDF、Excel、CSV、文档和图片均可导入' }}
+          </span>
+          <span v-if="sourceFolder" class="mt-1 text-xs text-gray-400">{{ sourceFolder }}</span>
+        </button>
+        <input ref="folderInput" class="hidden" type="file" webkitdirectory multiple @change="chooseFiles">
+        <input ref="filesInput" class="hidden" type="file" multiple
+          accept=".txt,.md,.pdf,.csv,.xlsx,.docx,.png,.jpg,.jpeg" @change="chooseFiles">
+
+        <div class="mt-5 flex justify-end">
+          <Button :disabled="initializing || !selectedFiles.length" @click="initialize">
+            <LoaderCircle v-if="initializing" class="h-4 w-4 animate-spin" />
+            {{ initializing ? '初始化中' : '初始化项目' }}
           </Button>
         </div>
       </div>
 
-      <!-- Step 2: Question Input -->
-      <div v-if="currentStep === 2" class="p-6">
+      <div v-else-if="project" class="p-6">
+        <header class="mb-5 flex items-start justify-between gap-4 border-b pb-4">
+          <div>
+            <div class="flex items-center gap-2 text-green-700">
+              <FileArchive class="h-5 w-5" />
+              <h2 class="font-semibold">工作区初始化完成</h2>
+            </div>
+            <p class="mt-1 break-all text-xs text-gray-500">{{ project.workspace }}</p>
+          </div>
+          <span class="shrink-0 text-xs text-gray-500">{{ project.file_count }} 个文件 · {{ formattedSize }}</span>
+        </header>
+
+        <div class="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="border p-3">
+            <FileText class="mb-2 h-4 w-4 text-blue-600" />
+            <div class="text-xs text-gray-500">主题目</div>
+            <div class="mt-1 truncate text-sm font-medium">{{ project.problem_file || '待选择' }}</div>
+          </div>
+          <div class="border p-3">
+            <Database class="mb-2 h-4 w-4 text-green-600" />
+            <div class="text-xs text-gray-500">数据集</div>
+            <div class="mt-1 text-sm font-medium">{{ project.datasets.length }} 个</div>
+          </div>
+          <div class="border p-3">
+            <FileArchive class="mb-2 h-4 w-4 text-gray-600" />
+            <div class="text-xs text-gray-500">参考文件</div>
+            <div class="mt-1 text-sm font-medium">{{ project.references.length }} 个</div>
+          </div>
+        </div>
+
         <div class="space-y-4">
-          <div class="space-y-1">
-            <h4 class="text-sm font-medium mb-2">粘贴完整题目</h4>
-            <Textarea v-model="question" placeholder="PDF 中完整题目背景和多个小问" class="min-h-[120px]" />
+          <Select v-if="project.problem_candidates.length > 1" v-model="options.problemFile">
+            <SelectTrigger><SelectValue placeholder="选择主题目" /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>主题目候选</SelectLabel>
+                <SelectItem v-for="path in project.problem_candidates" :key="path" :value="path">{{ path }}</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+
+          <Textarea v-model="notes" placeholder="补充要求（可选）" class="min-h-20" />
+
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Select v-model="options.competition">
+              <SelectTrigger><SelectValue placeholder="竞赛模板" /></SelectTrigger>
+              <SelectContent><SelectItem value="CUMCM">全国赛</SelectItem><SelectItem value="MCM">MCM / ICM</SelectItem></SelectContent>
+            </Select>
+            <Select v-model="options.language">
+              <SelectTrigger><SelectValue placeholder="论文语言" /></SelectTrigger>
+              <SelectContent><SelectItem value="Chinese">中文</SelectItem><SelectItem value="English">英文</SelectItem></SelectContent>
+            </Select>
+            <Select v-model="options.paperEngine">
+              <SelectTrigger><SelectValue placeholder="排版引擎" /></SelectTrigger>
+              <SelectContent><SelectItem value="LaTeX">LaTeX</SelectItem><SelectItem value="Typst">Typst</SelectItem></SelectContent>
+            </Select>
           </div>
 
-          <div class="grid grid-cols-3 gap-3">
-            <div v-for="item in selectConfig" :key="item.key">
-              <Select v-model="selectedOptions[item.key.toLowerCase() as keyof typeof selectedOptions]"
-                :defaultValue="item.options[0].toLowerCase()">
-                <SelectTrigger class="h-9">
-                  <SelectValue :placeholder="item.label" />
-                </SelectTrigger>
+          <div class="space-y-3 border-t pt-4">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input v-model="options.unifiedModel" type="checkbox" class="h-4 w-4">
+              规划和执行使用同一模型
+            </label>
+
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-[96px_1fr_140px] sm:items-center">
+              <span class="text-sm font-medium text-gray-700">规划 / 审查</span>
+              <Select v-model="options.plannerModel" :disabled="modelsLoading || models.length === 0">
+                <SelectTrigger><SelectValue :placeholder="modelsLoading ? '读取模型中' : 'Pi 默认模型'" /></SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectLabel>{{ item.key }}</SelectLabel>
-                    <SelectItem v-for="option in item.options" :key="option" :value="option.toLowerCase()">
-                      {{ option }}
+                    <SelectLabel>Pi 模型</SelectLabel>
+                    <SelectItem v-for="model in models" :key="model.id" :value="model.id">
+                      {{ model.id }} · {{ model.context }}
                     </SelectItem>
                   </SelectGroup>
+                </SelectContent>
+              </Select>
+              <Select v-model="options.plannerThinking" :disabled="!plannerSupportsThinking">
+                <SelectTrigger><SelectValue placeholder="思考强度" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="level in thinkingLevels" :key="level" :value="level">{{ level }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div v-if="!options.unifiedModel" class="grid grid-cols-1 gap-3 sm:grid-cols-[96px_1fr_140px] sm:items-center">
+              <span class="text-sm font-medium text-gray-700">执行 / 写作</span>
+              <Select v-model="options.workerModel" :disabled="modelsLoading || models.length === 0">
+                <SelectTrigger><SelectValue placeholder="Pi 默认模型" /></SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Pi 模型</SelectLabel>
+                    <SelectItem v-for="model in models" :key="model.id" :value="model.id">
+                      {{ model.id }} · {{ model.context }}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <Select v-model="options.workerThinking" :disabled="!workerSupportsThinking">
+                <SelectTrigger><SelectValue placeholder="思考强度" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="level in thinkingLevels" :key="level" :value="level">{{ level }}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
         </div>
-        <div class="mt-4 flex justify-between">
-          <Button variant="outline" @click="prevStep" size="sm">
-            上一步
+
+        <footer class="mt-6 flex justify-between">
+          <Button variant="outline" :disabled="starting" @click="resetImport">重新选择</Button>
+          <Button :disabled="starting || !options.problemFile" @click="start">
+            <LoaderCircle v-if="starting" class="h-4 w-4 animate-spin" />
+            {{ starting ? '启动 Pi 中' : '开始执行' }}
           </Button>
-          <Button @click="handleSubmit" size="sm">
-            开始分析
-          </Button>
-        </div>
+        </footer>
       </div>
-    </div>
+    </section>
   </div>
-  <FileConfirmDialog ref="fileConfirmDialog" />
 </template>

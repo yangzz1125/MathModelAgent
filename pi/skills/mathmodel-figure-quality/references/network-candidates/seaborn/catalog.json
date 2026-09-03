@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "source": {
+    "project": "seaborn",
+    "repository": "https://github.com/mwaskom/seaborn",
+    "gallery": "https://seaborn.pydata.org/examples/index.html",
+    "license": "BSD-3-Clause",
+    "license_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/LICENSE.md"
+  },
+  "status": "integrated_reference",
+  "evidence_eligible": false,
+  "templates": [
+    {
+      "id": "seaborn-errorband-line",
+      "plot_family": "line-with-error-band",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/errorband_lineplots.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/errorband_lineplots.py",
+      "page_url": "https://seaborn.pydata.org/examples/errorband_lineplots.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/errorband_lineplots.py",
+      "appropriate_for": "Repeated measurements or estimates with a defined uncertainty interval.",
+      "avoid_when": "The band has no documented statistical meaning or independent series are connected as repeated data.",
+      "required_adaptation": "Replace fmri demo data, define the estimator and interval, and retain line-style redundancy."
+    },
+    {
+      "id": "seaborn-grouped-bar",
+      "plot_family": "grouped-bar",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/grouped_barplot.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/grouped_barplot.py",
+      "page_url": "https://seaborn.pydata.org/examples/grouped_barplot.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/grouped_barplot.py",
+      "appropriate_for": "A small number of methods compared over the same categories with a meaningful zero baseline.",
+      "avoid_when": "There are many groups, zero is irrelevant, or uncertainty definitions differ.",
+      "required_adaptation": "Replace tips data, document error bars, add direct values when useful, and add hatch for grayscale."
+    },
+    {
+      "id": "seaborn-grouped-box",
+      "plot_family": "grouped-boxplot",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/grouped_boxplot.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/grouped_boxplot.py",
+      "page_url": "https://seaborn.pydata.org/examples/grouped_boxplot.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/grouped_boxplot.py",
+      "appropriate_for": "Comparing distributions across two categorical factors.",
+      "avoid_when": "Samples are too sparse or raw observations are necessary to expose structure.",
+      "required_adaptation": "Replace tips data, report sample sizes, and overlay raw points when affordable."
+    },
+    {
+      "id": "seaborn-horizontal-box",
+      "plot_family": "horizontal-boxplot",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/horizontal_boxplot.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/horizontal_boxplot.py",
+      "page_url": "https://seaborn.pydata.org/examples/horizontal_boxplot.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/horizontal_boxplot.py",
+      "appropriate_for": "Many categories with long labels and comparable numeric distributions.",
+      "avoid_when": "Ordering has no meaning or outliers are hidden without explanation.",
+      "required_adaptation": "Replace iris data, sort categories by a declared statistic, and preserve outlier semantics."
+    },
+    {
+      "id": "seaborn-bubble-scatter",
+      "plot_family": "bubble-scatter",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/scatter_bubbles.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/scatter_bubbles.py",
+      "page_url": "https://seaborn.pydata.org/examples/scatter_bubbles.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/scatter_bubbles.py",
+      "appropriate_for": "Two quantitative axes plus a defensible positive magnitude encoded by area.",
+      "avoid_when": "Bubble size represents signed values, precise size comparison is required, or points heavily overlap.",
+      "required_adaptation": "Replace mpg data, use perceptual area scaling, and add marker redundancy for categories."
+    },
+    {
+      "id": "seaborn-stacked-histogram",
+      "plot_family": "stacked-histogram",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/histogram_stacked.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/histogram_stacked.py",
+      "page_url": "https://seaborn.pydata.org/examples/histogram_stacked.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/histogram_stacked.py",
+      "appropriate_for": "Showing how a few groups contribute to counts across common bins.",
+      "avoid_when": "Group shapes must be compared precisely or bin choice would dominate the conclusion.",
+      "required_adaptation": "Replace penguins data, declare bins and normalization, and show group sample sizes."
+    },
+    {
+      "id": "seaborn-multiple-ecdf",
+      "plot_family": "multiple-ecdf",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/multiple_ecdf.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/multiple_ecdf.py",
+      "page_url": "https://seaborn.pydata.org/examples/multiple_ecdf.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/multiple_ecdf.py",
+      "appropriate_for": "Comparing complete distributions without choosing histogram bins.",
+      "avoid_when": "There are too many groups or weighted observations are not handled explicitly.",
+      "required_adaptation": "Replace penguins data, add line-style redundancy, and annotate decision-relevant quantiles."
+    },
+    {
+      "id": "seaborn-residual-plot",
+      "plot_family": "residual-diagnostic",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/residplot.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/residplot.py",
+      "page_url": "https://seaborn.pydata.org/examples/residplot.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/residplot.py",
+      "appropriate_for": "Checking systematic residual structure, heteroscedasticity, and outliers after fitting.",
+      "avoid_when": "Residuals are computed on training data only or their sign convention is unstated.",
+      "required_adaptation": "Use held-out residuals when claimed, label zero, and state residual definition and scale."
+    },
+    {
+      "id": "seaborn-spreadsheet-heatmap",
+      "plot_family": "annotated-heatmap",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/spreadsheet_heatmap.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/spreadsheet_heatmap.py",
+      "page_url": "https://seaborn.pydata.org/examples/spreadsheet_heatmap.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/spreadsheet_heatmap.py",
+      "appropriate_for": "A compact matrix with meaningful row/column labels and common scale.",
+      "avoid_when": "Cells are not comparable or a diverging midpoint has no scientific interpretation.",
+      "required_adaptation": "Replace flights data, choose a semantic colormap, label the colorbar, and limit visible annotations."
+    },
+    {
+      "id": "seaborn-paired-point",
+      "plot_family": "paired-pointplot",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/paired_pointplots.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/paired_pointplots.py",
+      "page_url": "https://seaborn.pydata.org/examples/paired_pointplots.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/paired_pointplots.py",
+      "appropriate_for": "Matched observations across ordered conditions with a real pairing key.",
+      "avoid_when": "Observations are independent or connecting lines imply nonexistent correspondence.",
+      "required_adaptation": "Replace exercise data, preserve pairing IDs, and distinguish individual paths from the aggregate."
+    },
+    {
+      "id": "seaborn-wide-line",
+      "plot_family": "wide-form-line",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/wide_data_lineplot.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/wide_data_lineplot.py",
+      "page_url": "https://seaborn.pydata.org/examples/wide_data_lineplot.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/wide_data_lineplot.py",
+      "appropriate_for": "A few aligned time series sharing units and sampling times.",
+      "avoid_when": "Series use different units or dense lines obscure the decision-relevant trend.",
+      "required_adaptation": "Replace flights data, use direct labels or a compact legend, and add line-style redundancy."
+    },
+    {
+      "id": "seaborn-part-whole-bars",
+      "plot_family": "part-whole-bars",
+      "preview_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/previews/part_whole_bars.png",
+      "script_path": "pi/skills/mathmodel-figure-quality/references/network-candidates/seaborn/scripts/part_whole_bars.py",
+      "page_url": "https://seaborn.pydata.org/examples/part_whole_bars.html",
+      "source_url": "https://github.com/mwaskom/seaborn/blob/master/examples/part_whole_bars.py",
+      "appropriate_for": "Comparing component values against explicit totals across categories.",
+      "avoid_when": "Components do not share a common whole or totals vary without being shown.",
+      "required_adaptation": "Replace crashes data, state the denominator, sort deliberately, and label important differences."
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "skills": [
+    "../skills",
+    "../pi/skills"
+  ],
+  "enableSkillCommands": true
+}

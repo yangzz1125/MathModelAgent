@@ -24,15 +24,11 @@ import { onMounted, onUnmounted, ref } from "vue";
 
 /** 单个服务状态 */
 interface ServiceStatus {
-	status: "running" | "error" | "unknown";
+	status: string;
 	message: string;
 }
 
-/** 所有服务状态 */
-interface Services {
-	backend: ServiceStatus;
-	redis: ServiceStatus;
-}
+type Services = Record<string, ServiceStatus>;
 
 // ---- Reactive State ----
 
@@ -40,11 +36,11 @@ const { toast } = useToast();
 
 /** 服务状态数据 */
 const services = ref<Services>({
-	backend: { status: "unknown", message: "Checking..." },
-	redis: { status: "unknown", message: "Checking..." },
+	bridge: { status: "unknown", message: "Checking..." },
+	pi: { status: "unknown", message: "Checking..." },
 });
 
-let statusInterval: number | null = null;
+let statusInterval: ReturnType<typeof setInterval> | null = null;
 
 // ---- Methods ----
 
@@ -81,14 +77,13 @@ const checkStatus = async () => {
 
 		// 检查是否有服务状态变化为错误
 		for (const key of Object.keys(response.data)) {
-			const serviceKey = key as keyof Services;
-			const newStatus = response.data[serviceKey].status;
-			const oldStatusValue = oldStatus[serviceKey].status;
+			const newStatus = response.data[key].status;
+			const oldStatusValue = oldStatus[key]?.status;
 
 			if (newStatus === "error" && oldStatusValue !== "error") {
 				toast({
 					title: "服务警告",
-					description: `${serviceKey.toUpperCase()} 服务连接失败: ${response.data[serviceKey].message}`,
+					description: `${key.toUpperCase()} 服务连接失败: ${response.data[key].message}`,
 					variant: "destructive",
 				});
 			}

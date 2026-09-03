@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/utils/enum";
+import { Bot, User } from "lucide-vue-next";
 import { marked } from "marked";
 import type { HTMLAttributes } from "vue";
 import { computed } from "vue";
@@ -34,20 +35,16 @@ const renderedContent = computed(() => {
     props.type === 'agent' && props.agentType === 'WriterAgent' ? 'bubble-writer' : '',
     props.class
   ]">
-    <div class="flex flex-col gap-1 flex-1">
+    <div class="flex min-w-0 flex-1 flex-col gap-1">
       <!-- 头像在上方 -->
-      <span v-if="props.type === 'user'" class="text-2xl select-none mb-1">🧑</span>
-      <span v-else-if="props.type === 'agent' && props.agentType === 'CoderAgent'"
-        class="text-2xl select-none mb-1">👨‍💻</span>
-      <span v-else-if="props.type === 'agent' && props.agentType === 'WriterAgent'"
-        class="text-2xl select-none mb-1">✍️</span>
+      <User v-if="props.type === 'user'" class="mb-1 h-5 w-5" aria-label="用户" />
+      <Bot v-else class="mb-1 h-5 w-5" aria-label="Pi" />
       <!-- 气泡内容在下方 -->
       <div :class="cn(
-        'max-w-[80%] rounded-2xl px-4 py-2 text-sm',
+        'prose prose-sm prose-slate min-w-0 rounded-2xl px-4 py-2 text-sm',
         props.type === 'user'
-          ? 'bg-primary text-primary-foreground prose-invert'
-          : 'bg-muted text-foreground',
-        'prose prose-sm prose-slate max-w-none'
+          ? 'self-end max-w-[80%] bg-primary text-primary-foreground prose-invert'
+          : 'self-start max-w-full bg-muted text-foreground sm:max-w-[80%]'
       )">
         <div v-html="renderedContent"></div>
       </div>
@@ -58,6 +55,8 @@ const renderedContent = computed(() => {
 <style>
 .prose {
   @apply text-inherit;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .prose p {
@@ -107,6 +106,8 @@ const renderedContent = computed(() => {
 
 .prose code {
   @apply px-1 py-0.5 rounded bg-black/10 dark:bg-white/10;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .prose pre {
@@ -164,6 +165,8 @@ const renderedContent = computed(() => {
 .bubble {
   display: flex;
   flex: 1 1 0%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .bubble-user {

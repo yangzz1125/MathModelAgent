@@ -27,7 +27,6 @@ import {
 	File,
 	FileText,
 	Files,
-	Folder,
 	RefreshCw,
 } from "lucide-vue-next";
 import { ref } from "vue";
@@ -39,11 +38,19 @@ const route = useRoute();
 const taskId = route.params.task_id;
 const { toast } = useToast();
 
+/** 工作区文件 */
+interface WorkspaceFile {
+	filename: string;
+	file_type: string;
+	size?: number;
+	modified_time?: string;
+}
+
 /** 文件列表弹窗显示状态 */
 const fileListVisible = ref(false);
 
 /** 文件列表数据 */
-const fileList = ref<Record<string, unknown>[]>([]);
+const fileList = ref<WorkspaceFile[]>([]);
 
 /** 加载状态 */
 const loadingFiles = ref(false);
@@ -63,7 +70,7 @@ const openFolder = async () => {
 		const res = await getFiles(taskId as string);
 
 		if (res.data) {
-			fileList.value = Array.isArray(res.data) ? res.data : [res.data];
+			fileList.value = res.data;
 			fileListVisible.value = true;
 		} else {
 			toast({
@@ -189,7 +196,6 @@ const downloadAll = async () => {
             <Button @click="openFolder()" :disabled="loadingFiles" class="flex gap-2" size="icon">
               <RefreshCw v-if="loadingFiles" class="w-4 h-4 animate-spin" />
               <Files v-else class="w-4 h-4" />
-              <Folder v-else class="w-4 h-4" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>
@@ -202,11 +208,14 @@ const downloadAll = async () => {
     <SheetContent side="right" class="w-[400px] sm:w-[540px]">
       <SheetHeader>
         <SheetTitle class="flex items-center justify-between mr-5">
-          工作区文件
-
+          <span>工作区文件</span>
+          <Button size="icon" variant="ghost" :disabled="downloadingAll" @click="downloadAll" title="下载全部文件">
+            <RefreshCw v-if="downloadingAll" class="h-4 w-4 animate-spin" />
+            <Archive v-else class="h-4 w-4" />
+          </Button>
         </SheetTitle>
         <SheetDescription>
-          运行的结果和产生在<span class="font-mono">backend/project/work_dir/{{ taskId }}/*</span> 目录下
+          任务产物保存在 <span class="font-mono">E:\MathModelAgentPi\workspaces\{{ taskId }}</span>
         </SheetDescription>
       </SheetHeader>
 
@@ -218,26 +227,26 @@ const downloadAll = async () => {
           <div v-else class="space-y-2">
             <div v-for="(file, index) in fileList" :key="index"
               class="flex items-center gap-3 p-3 rounded-lg border hover:bg-gray-50 transition-colors">
-              <component :is="getFileIcon(file.name || file.filename || '')"
+              <component :is="getFileIcon(file.filename)"
                 class="w-5 h-5 text-gray-600 flex-shrink-0" />
               <div class="flex-1 min-w-0">
                 <div class="font-medium text-sm truncate">
-                  {{ file.name || file.filename || 'Unknown' }}
+                  {{ file.filename }}
                 </div>
                 <div class="text-xs text-gray-500 flex gap-2">
                   <span v-if="file.size">{{ formatFileSize(file.size) }}</span>
                   <span v-if="file.modified_time">{{ new Date(file.modified_time).toLocaleDateString()
                     }}</span>
-                  <span v-if="file.type">{{ file.type }}</span>
+                  <span>{{ file.file_type }}</span>
                 </div>
               </div>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger as-child>
-                    <Button @click="downloadSingleFile(file.name || file.filename || '')"
-                      :disabled="downloadingFile === (file.name || file.filename || '')" size="sm" variant="ghost"
+                    <Button @click="downloadSingleFile(file.filename)"
+                      :disabled="downloadingFile === file.filename" size="sm" variant="ghost"
                       class="flex-shrink-0">
-                      <RefreshCw v-if="downloadingFile === (file.name || file.filename || '')"
+                      <RefreshCw v-if="downloadingFile === file.filename"
                         class="w-4 h-4 animate-spin" />
                       <Download v-else class="w-4 h-4" />
                     </Button>

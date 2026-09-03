@@ -83,7 +83,7 @@ const isResultCell = (cell: NoteCell): cell is ResultCell => {
           'px-2 py-1 rounded text-xs font-medium',
           cell.type === 'code' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'
         ]">
-          {{ cell.type === 'code' ? 'Code' : 'Result' }}
+          {{ cell.type === 'code' ? (cell.label || 'Tool') : 'Result' }}
         </span>
       </div>
     </div>

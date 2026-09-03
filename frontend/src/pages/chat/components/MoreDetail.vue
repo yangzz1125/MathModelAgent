@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { Button } from "@/components/ui/button";
 import {
 	Dialog,
-	DialogClose,
 	DialogContent,
 	DialogDescription,
 	DialogHeader,
@@ -26,22 +24,12 @@ const modelValue = defineModel({
         </DialogDescription>
       </DialogHeader>
       <div>
-        运行的结果:
-        backend/project/work_dir/xxx/*
-        <br>
-        - notebook.ipynb: 保存运行过程中产生的代码<br>
-
-        - res.md: 保存最后运行产生的结果为 markdown 格式
+        每个任务的输入、代码、结果、图表和论文保存在独立工作区：
+        <code>E:\MathModelAgentPi\workspaces\&lt;task-id&gt;</code>
       </div>
 
       <div>
-        修改模板：
-        backend/app/config/md_template.toml
-      </div>
-
-      <div>
-        修改提示词
-        backend/app/core/prompts.py
+        模型、凭据和会话由本机 Pi 配置管理，浏览器不会保存 API Key。
       </div>
 
     </DialogContent>

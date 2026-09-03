@@ -16,7 +16,8 @@ export interface BaseMessage {
 /** 工具调用消息 */
 export interface ToolMessage extends BaseMessage {
 	msg_type: "tool";
-	tool_name: "execute_code" | "search_scholar";
+	tool_name: string;
+	tool_label?: string;
 	input: Record<string, unknown> | null;
 	output: string[] | OutputItem[] | null;
 }
@@ -97,6 +98,8 @@ export type OutputItem =
 	| StdErrExecution
 	| ResultExecution
 	| ErrorExecution;
+
+export type CodeExecutionResult = OutputItem;
 
 /** 文献搜索工具消息 */
 export interface ScholarMessage extends ToolMessage {

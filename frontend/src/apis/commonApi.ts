@@ -11,10 +11,76 @@ export function getWriterSeque() {
 	return request.get<{ writer_seque: string[] }>("/writer_seque");
 }
 
-/**
- * 获取任务的历史消息
- * @param task_id 任务ID
- */
+/** 获取本机 Pi 可用模型和思考强度 */
+export function getPiModels() {
+	return request.get<{
+		models: {
+			id: string;
+			provider: string;
+			model: string;
+			context: string;
+			max_output: string;
+			thinking: boolean;
+			images: boolean;
+		}[];
+		default_model: string;
+		default_thinking: string;
+		thinking_levels: string[];
+	}>("/models");
+}
+
+/** 获取 Pi 任务状态和动态阶段进度 */
+export function getTaskStatus(task_id: string) {
+	return request.get<{
+		task_id: string;
+		status:
+			| "starting"
+			| "running"
+			| "paused"
+			| "waiting"
+			| "completed"
+			| "cancelled"
+			| "failed"
+			| "stopped";
+		model: string;
+		thinking: string;
+		profiles: {
+			planner: { model: string; thinking: string };
+			worker: { model: string; thinking: string };
+		} | null;
+		current_stage: string | null;
+		mode: string | null;
+		plan_version: number | null;
+		contract_version: number | null;
+		paused_at: string | null;
+		pause_reason: string | null;
+		pause_count: number;
+		resume_count: number;
+		can_pause: boolean;
+		can_resume: boolean;
+		started_at: string;
+		paper_url: string | null;
+		phases: {
+			id: string;
+			label: string;
+			status:
+				| "pending"
+				| "running"
+				| "paused"
+				| "completed"
+				| "waiting"
+				| "failed";
+			attempts?: number;
+			review_attempts?: number;
+			replan_attempts?: number;
+			review_status?: string;
+			scientific_status?: string;
+			last_error?: string;
+		}[];
+	}>(`/task/${task_id}/status`);
+}
+
+/** 获取任务的历史消息 */
 export function getTaskMessages(task_id: string) {
 	return request.get<Message[]>("/messages", {
 		params: {
@@ -52,10 +118,23 @@ export function exampleAPI(example_id: string, source: string) {
 
 /** 获取后端和 Redis 服务状态 */
 export function getServiceStatus() {
-	return request.get<{
-		backend: { status: string; message: string };
-		redis: { status: string; message: string };
-	}>("/status");
+	return request.get<Record<string, { status: string; message: string }>>(
+		"/status",
+	);
+}
+
+/** 持久化暂停当前阶段并终止 Pi 进程树。 */
+export function pauseTask(task_id: string) {
+	return request.post<{ success: boolean; message: string }>(
+		`/modeling/${task_id}/pause`,
+	);
+}
+
+/** 从 project.json 记录的阶段和模式启动新的 Pi RPC 进程。 */
+export function resumeTask(task_id: string) {
+	return request.post<{ success: boolean; message: string }>(
+		`/modeling/${task_id}/resume`,
+	);
 }
 
 /**

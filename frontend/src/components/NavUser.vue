@@ -4,10 +4,8 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
-	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -16,15 +14,7 @@ import {
 	SidebarMenuItem,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import ApiKeyDialog from "@/pages/chat/components/ApiDialog.vue";
-import {
-	BadgeCheck,
-	Bell,
-	ChevronsUpDown,
-	KeyRound,
-	LogOut,
-} from "lucide-vue-next";
-import { ref } from "vue";
+import { ChevronsUpDown, TerminalSquare } from "lucide-vue-next";
 
 // ---- Props ----
 
@@ -32,9 +22,9 @@ const props = defineProps({
 	user: {
 		type: Object,
 		default: () => ({
-			name: "San Jin",
-			email: "mathmodel@mathmodel.com",
-			avatar: "https://github.com/jihe520.png",
+			name: "Pi",
+			email: "本机模型配置",
+			avatar: "https://github.com/badlogic.png",
 		}),
 	},
 });
@@ -42,15 +32,6 @@ const props = defineProps({
 // ---- Reactive State ----
 
 const { isMobile } = useSidebar();
-
-/** API Key 对话框开关状态 */
-const isApiKeyDialogOpen = ref(false);
-
-// ---- Methods ----
-
-const openApiKeyDialog = () => {
-	isApiKeyDialogOpen.value = true;
-};
 </script>
 
 <template>
@@ -89,33 +70,13 @@ const openApiKeyDialog = () => {
               </div>
             </div>
           </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuItem @click="openApiKeyDialog">
-              <KeyRound />
-              API Key
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuItem>
-              <BadgeCheck />
-              Account
-            </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Bell />
-              Notifications
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem>
-            <LogOut />
-            Log out
+          <DropdownMenuItem disabled>
+            <TerminalSquare />
+            模型与凭据由 Pi 管理
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </SidebarMenuItem>
   </SidebarMenu>
-  <ApiKeyDialog v-model:open="isApiKeyDialogOpen" />
 
 </template>

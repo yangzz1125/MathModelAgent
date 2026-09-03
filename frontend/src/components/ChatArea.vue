@@ -2,6 +2,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useStickyScroll } from "@/composables/useStickyScroll";
+import { useTaskStore } from "@/stores/task";
 import type { Message } from "@/utils/response";
 import { Send } from "lucide-vue-next";
 import { ref } from "vue";
@@ -11,6 +12,7 @@ import SystemMessage from "./SystemMessage.vue";
 // ---- Props ----
 
 const props = defineProps<{ messages: Message[] }>();
+const taskStore = useTaskStore();
 
 // ---- Reactive State ----
 
@@ -24,9 +26,10 @@ const { onScroll } = useStickyScroll(scrollRef, () => props.messages);
 
 // ---- Methods ----
 
-/** 发送消息（本地处理） */
+/** 发送消息到当前 Pi 会话 */
 const sendMessage = () => {
-	if (!inputValue.value.trim()) return;
+	const content = inputValue.value.trim();
+	if (!content || !taskStore.sendMessage(content)) return;
 	inputValue.value = "";
 	inputRef.value?.focus();
 };
@@ -49,8 +52,10 @@ const sendMessage = () => {
       </template>
     </div>
     <form class="w-full max-w-2xl mx-auto flex items-center gap-2 pt-4" @submit.prevent="sendMessage">
-      <Input ref="inputRef" v-model="inputValue" type="text" placeholder="请输入消息..." class="flex-1" autocomplete="off" />
-      <Button type="submit" :disabled="!inputValue.trim()">
+      <Input ref="inputRef" v-model="inputValue" type="text" placeholder="向 Pi 发送后续指令..." class="flex-1"
+        autocomplete="off" :disabled="taskStore.wsStatus !== 'connected'" />
+      <Button type="submit" size="icon"
+        :disabled="!inputValue.trim() || taskStore.wsStatus !== 'connected'" title="发送">
         <Send />
       </Button>
     </form>

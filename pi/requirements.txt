@@ -1,0 +1,12 @@
+numpy
+pandas
+matplotlib
+SciencePlots==2.2.2
+seaborn==0.13.2
+adjustText==1.4.0
+scipy
+scikit-learn
+openpyxl
+fastapi>=0.115
+python-multipart>=0.0.20
+uvicorn[standard]>=0.34

@@ -4,6 +4,7 @@ export enum AgentType {
 	MODELER = "ModelerAgent",
 	CODER = "CoderAgent",
 	WRITER = "WriterAgent",
+	PI = "PiAgent",
 }
 
 /** LLM API 类型枚举 */

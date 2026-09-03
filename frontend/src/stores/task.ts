@@ -1,5 +1,9 @@
 import { getTaskMessages } from "@/apis/commonApi";
-import { cancelTask as cancelTaskAPI } from "@/apis/commonApi";
+import {
+	cancelTask as cancelTaskAPI,
+	pauseTask as pauseTaskAPI,
+	resumeTask as resumeTaskAPI,
+} from "@/apis/commonApi";
 import { AgentType } from "@/utils/enum";
 import type {
 	CoderMessage,
@@ -143,6 +147,11 @@ export const useTaskStore = defineStore("task", () => {
 
 	// ---- Actions ----
 
+	/** 同步后端运行状态 */
+	function setRunning(running: boolean) {
+		isRunning.value = running;
+	}
+
 	/** 连接 WebSocket 接收实时消息 */
 	function connectWebSocket(taskId: string) {
 		if (ws) {
@@ -202,6 +211,30 @@ export const useTaskStore = defineStore("task", () => {
 		ws = null;
 	}
 
+	/** 持久化暂停当前任务。 */
+	async function pauseTask(taskId: string) {
+		try {
+			const res = await pauseTaskAPI(taskId);
+			if (res.data.success) isRunning.value = false;
+			return res.data;
+		} catch (error) {
+			console.error("暂停任务失败:", error);
+			return { success: false, message: "暂停请求失败" };
+		}
+	}
+
+	/** 从持久状态恢复当前任务。 */
+	async function resumeTask(taskId: string) {
+		try {
+			const res = await resumeTaskAPI(taskId);
+			if (res.data.success) isRunning.value = true;
+			return res.data;
+		} catch (error) {
+			console.error("恢复任务失败:", error);
+			return { success: false, message: "恢复请求失败" };
+		}
+	}
+
 	/** 取消正在运行的任务 */
 	async function stopTask(taskId: string) {
 		try {
@@ -214,6 +247,24 @@ export const useTaskStore = defineStore("task", () => {
 			console.error("取消任务失败:", error);
 			return { success: false, message: "取消请求失败" };
 		}
+	}
+
+	/** 发送消息到当前 Pi 会话 */
+	function sendMessage(content: string) {
+		const text = content.trim();
+		if (!text || !currentTaskId.value || !ws) {
+			return false;
+		}
+		const message = {
+			id: crypto.randomUUID(),
+			msg_type: "user" as const,
+			content: text,
+			created_at: new Date().toISOString(),
+		};
+		appendMessage(currentTaskId.value, message);
+		ws.send({ type: "prompt", id: message.id, message: text });
+		isRunning.value = true;
+		return true;
 	}
 
 	/** 添加用户消息 */
@@ -242,15 +293,10 @@ export const useTaskStore = defineStore("task", () => {
 
 	// ---- Computed ----
 
-	/** 聊天消息列表（用户、Coder Agent、系统消息） */
+	/** 聊天消息列表 */
 	const chatMessages = computed(() =>
 		messages.value.filter((msg) => {
-			if (
-				msg.msg_type === "agent" &&
-				msg.agent_type === AgentType.CODER &&
-				msg.content != null &&
-				msg.content !== ""
-			) {
+			if (msg.msg_type === "agent" && msg.content) {
 				return true;
 			}
 			if (msg.msg_type === "user") {
@@ -306,15 +352,15 @@ export const useTaskStore = defineStore("task", () => {
 		),
 	);
 
-	/** 代码执行工具消息列表 */
-	const interpreterMessage = computed(() =>
+	/** Pi 工具调用消息 */
+	const toolMessages = computed(() =>
 		messages.value.filter(
-			(msg): msg is InterpreterMessage =>
-				msg.msg_type === "tool" &&
-				"tool_name" in msg &&
-				msg.tool_name === "execute_code",
+			(msg): msg is InterpreterMessage => msg.msg_type === "tool",
 		),
 	);
+
+	/** 代码执行工具消息列表 */
+	const interpreterMessage = computed(() => toolMessages.value);
 
 	/** 从最新代码手消息中提取文件列表 */
 	const files = computed(() => {
@@ -350,12 +396,18 @@ export const useTaskStore = defineStore("task", () => {
 		coderMessages,
 		writerMessages,
 		interpreterMessage,
+		toolMessages,
 		files,
+		setCurrentTask,
+		setRunning,
 		loadTaskMessages,
 		connectWebSocket,
 		closeWebSocket,
 		stopTask,
+		pauseTask,
+		resumeTask,
 		downloadMessages,
+		sendMessage,
 		addUserMessage,
 	};
 });

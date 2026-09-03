@@ -1,0 +1,83 @@
+# 真题测试就绪检查（2026-09-03）
+
+## 结论
+
+当前 `pi-integration` 分支已具备启动一轮全新 CUMCM 真题测试的运行条件。此次检查没有运行完整建模任务，只验证控制面、固定 fixture、已完成 workspace、绘图与论文工具链。
+
+## 已接入
+
+- Vue 导入、配置、任务页、文件下载、论文预览、暂停、恢复和终止。
+- Pi RPC bridge，默认 Sol high 负责规划/审查，Luna high 负责执行/写作。
+- Schema-v2 Planning → Plan Audit → Candidate → Scientific Review → Paper Planning → Diagram → Writing → Document Verification。
+- Host-only acceptance、严格 Reviewer JSON、受控重规划、修复预算、阶段边界、SHA-256 冻结和重启恢复。
+- `figure_specs`：Planner 预先声明 claim、目的、图型、reference、面板、编码、注释、尺寸和产物路径。
+- 30 项正式绘图参考，其中 12 项来自 Seaborn 官方 gallery；所有参考图均为 `evidence_eligible=false`。
+- 图表真实数据、生成器、矢量母版、PNG 预览、灰度和最终尺寸检查。
+- claim/evidence 驱动的论文规划、manifest、引用检查、版面检查和 Document Verification。
+
+## 本轮修复
+
+1. Windows 上传路径防护：拒绝 drive-relative、盘符绝对路径、UNC、遍历、NTFS alternate stream 和 NUL 路径。
+2. 文档工具前置检查：Start 前验证所选 `xelatex`/`typst` 与 `pdftoppm`；失败时项目保持 `ready`，不调用模型。
+3. 删除旧前端 API Key 对话框、API 和 localStorage 持久化 store；浏览器不再保留可误启用的凭据路径。
+4. 移除未实现的 zip 输入选项；继续支持文件夹和 PDF/Markdown/Text/CSV/XLSX/DOCX/PNG/JPEG。
+5. 将 12 个 Seaborn 网络模板提升为合法 `network-*` reference ID，同时禁止直接运行官方 demo 数据作为证据。
+
+## 验证证据
+
+- `python -m unittest discover -s pi/tests -p 'test_*.py'`：69 tests passed。
+- `validate_single_bakery.py workspaces/387f2e0b2668`：`SINGLE_BAKERY_PASS`。
+- 使用 `pdftoppm` 实际渲染已完成论文第一页：通过。
+- `python -m compileall`：通过。
+- `pip check`：无损坏依赖。
+- `npm run lint`：199 个前端源码文件通过；5.3 MiB 的上游 notebook 静态 fixture 被明确排除。
+- `vue-tsc -b && vite build`：通过，2427 modules transformed。
+- `git diff --check`：通过，仅有既有 LF/CRLF 提示。
+- Secret pattern scan：未发现 `sk-...` 密钥。
+- 30 项 reference catalog：全部可读取，12 个 `network-*` 项已注册。
+
+## 当前环境
+
+- Python 3.11.6
+- Pi 0.84.4
+- SciencePlots 2.2.2
+- Seaborn 0.13.2
+- adjustText 1.4.0
+- XeLaTeX / TeX Live 2025
+- Poppler `pdftoppm` 25.02.0
+- Node 24.13.0
+- pnpm 11.22.0
+- 中文字体：Source Han Serif SC
+- 磁盘 E: 可用约 267 GB
+
+服务：
+
+- Bridge：`http://127.0.0.1:8000`
+- Frontend：`http://127.0.0.1:5173/chat`
+
+## 真题启动参数
+
+1. 选择解压后的官方赛题文件夹，不上传 zip。
+2. 点击“初始化项目”，核对识别出的主题目、数据集数量和参考文件。
+3. CUMCM 选择“全国赛 / 中文 / LaTeX”。
+4. 规划/审查选择 `openai/gpt-5.6-sol` + `high`。
+5. 执行/写作选择 `openai/gpt-5.6-luna` + `high`。
+6. 点击“开始执行”。浏览器可以刷新或关闭；不要终止 bridge/frontend 服务终端。
+7. 临时停止使用“暂停”；“终止”是不可恢复的终态。
+
+## 运行中检查点
+
+- Planning 后应出现 schema-v2 `execution_plan.json`，每个问题含 `figure_specs`（无必要图时为 `[]`）。
+- Plan Audit 必须 accept 后才开始 q1。
+- 每个问题先产生 `candidate`，再由独立 Scientific Review accept。
+- 图表 provenance 必须引用当前问题真实数据，不能引用 `skills/`、`previews/`、examples 或 `*_replica`。
+- 所有问题接受后才进入 Paper Planning。
+- 最终只有 `reports/VERIFY_REPORT.md` 明确独立 `PASS` 且 PDF 可读时，任务才显示完成。
+
+## 非阻塞风险
+
+- 上游文件保留混合 LF/CRLF，`git diff --check` 仅给出换行转换提示；全目录 lint 和生产构建均通过，不影响运行。
+- Draw.io 未安装；它是可选项，Diagram 阶段必须在不需要概念图时写明省略理由。
+- Typst 未安装；选择 Typst 会在 Start 前被明确拒绝。当前应选择 LaTeX。
+- 已暴露的 DeepSeek API key 轮换仍是外部待办；本仓库未检出该密钥。
+- 历史 workspaces 保留 completed/failed/cancelled/paused 证据；新真题会创建独立 workspace，不会复用它们。

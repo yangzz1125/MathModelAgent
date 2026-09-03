@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { getHelloWorld } from "@/apis/commonApi";
 import AppSidebar from "@/components/AppSidebar.vue";
-import ModelingExamples from "@/components/ModelingExamples.vue";
 import ServiceStatus from "@/components/ServiceStatus.vue";
 import UserStepper from "@/components/UserStepper.vue";
 import Button from "@/components/ui/button/Button.vue";
@@ -57,16 +56,15 @@ onMounted(() => {
           <div class="text-center space-y-2 mb-10">
             <h1 class="text-2xl font-semibold">MathModelAgent</h1>
             <p class="text-muted-foreground">
-              让 Agent 数学建模，代码编写，论文写作
+              Pi 驱动的赛题分析、编程求解和论文生成
             </p>
           </div>
 
           <UserStepper>
           </UserStepper>
           <div class="text-center text-xs text-muted-foreground mt-8">
-            项目处于内测阶段，欢迎进群反馈
+            模型与凭据使用本机 Pi 配置
           </div>
-          <ModelingExamples />
         </div>
       </div>
     </SidebarInset>

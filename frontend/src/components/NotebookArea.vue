@@ -25,6 +25,7 @@ const cells = computed<NoteCell[]>(() => {
 			const codeCell: CodeCell = {
 				type: "code",
 				content: toolMsg.input.code,
+				label: toolMsg.tool_label ?? toolMsg.tool_name,
 			};
 			notebookCells.push(codeCell);
 		}
@@ -61,8 +62,8 @@ const { onScroll } = useStickyScroll(scrollRef, () => cells.value);
     <div v-if="cells.length === 0" class="flex items-center justify-center h-full">
       <div class="text-gray-400 text-center p-8">
         <div class="text-4xl mb-2">📝</div>
-        <div class="text-lg font-medium">暂无代码执行结果</div>
-        <div class="text-sm">执行代码后将在此显示结果</div>
+        <div class="text-lg font-medium">等待 Pi 调用工具</div>
+        <div class="text-sm">读取、编辑和命令执行会显示在这里</div>
       </div>
     </div>
     <!-- 添加底部空间 -->

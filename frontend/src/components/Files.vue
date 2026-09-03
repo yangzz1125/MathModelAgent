@@ -1,14 +1,7 @@
 <script setup lang="ts">
 import Tree from "@/components/Tree.vue";
-import {
-	Sidebar,
-	SidebarContent,
-	SidebarFooter,
-	SidebarGroup,
-	SidebarProvider,
-} from "@/components/ui/sidebar";
+import { SidebarContent, SidebarGroup } from "@/components/ui/sidebar";
 import { useTaskStore } from "@/stores/task";
-import { File } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 
 // ---- Reactive State ----
