@@ -963,7 +963,48 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ContractError, "metrics coverage mismatch"):
                 validate_spike_report(workspace, card)
 
-    async def test_failed_spike_is_not_reused_by_same_spec_revision(self) -> None:
+    async def test_failed_spike_retries_without_method_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "spike:q1"
+            workflow["mode"] = "feasibility_spike"
+            spike_phase = next(item for item in workflow["phases"] if item["id"] == "spike:q1")
+            spike_phase.update({"status": "running", "attempts": 1})
+            method_phase = next(item for item in workflow["phases"] if item["id"] == "method:q1")
+            method_attempts = method_phase["attempts"]
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            spike_dir = method_version_dir(runtime.workspace, "q1", 1) / "spike"
+            for path in spike_dir.iterdir():
+                path.unlink()
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            saved_spike = next(item for item in saved["phases"] if item["id"] == "spike:q1")
+            saved_method = next(item for item in saved["phases"] if item["id"] == "method:q1")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 1)
+            self.assertEqual(saved["current"], "spike:q1")
+            self.assertEqual(saved["mode"], "feasibility_spike")
+            self.assertEqual(saved_spike["attempts"], 2)
+            self.assertEqual(saved_spike["local_repair_attempts"], 1)
+            self.assertEqual(saved_method["attempts"], method_attempts)
+            runtime.prompt.assert_awaited_once()
+            runtime._switch_session.assert_not_awaited()
+            self.assertIn("same immutable Method Card", runtime.prompt.await_args.args[0])
+
+            card = runtime._method_card(saved)
+            assert card is not None
+            self._write_spike(runtime.workspace, card)
+            await runtime._settled()
+
+            completed = runtime._project()["workflow"]
+            self.assertEqual(completed["current"], "method_audit:q1")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 1)
+
+    async def test_spike_local_repair_exhaustion_fails_without_method_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._runtime_at_method_audit(directory)
             project = runtime._project()
@@ -979,22 +1020,18 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 path.unlink()
 
             await runtime._settled()
-            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 2)
-
-            inventory = validate_problem_inventory(runtime.workspace, 1)
-            revised = self._card(inventory)
-            revised["proposal_version"] = 2
-            self._write(method_version_dir(runtime.workspace, "q1", 2) / "method_card.json", revised)
-            (runtime.workspace / "reports" / "q1_METHOD_v2.md").write_text("# Same method\n", encoding="utf-8")
+            await runtime._settled()
             await runtime._settled()
 
-            saved = runtime._project()["workflow"]
-            self.assertEqual(saved["current"], "spike:q1")
-            self.assertFalse(any(
-                item.get("reused_from_version")
-                for item in saved["phases"]
-                if item["id"] == "spike:q1"
-            ))
+            saved = runtime._project()
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 1)
+            failed_spike = next(
+                item for item in saved["workflow"]["phases"] if item["id"] == "spike:q1"
+            )
+            self.assertEqual(failed_spike["attempts"], 3)
+            self.assertEqual(failed_spike["local_repair_attempts"], 2)
+            self.assertIn("spike_repair_exhausted", failed_spike["last_error"])
 
     async def test_inventory_audit_pending_transition_replays_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1231,7 +1268,12 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             workflow["current"] = "spike:q1"
             workflow["mode"] = "feasibility_spike"
             spike_phase = next(item for item in workflow["phases"] if item["id"] == "spike:q1")
-            spike_phase.update({"status": "running", "attempts": 1})
+            spike_phase.update({
+                "status": "running",
+                "attempts": 2,
+                "local_repair_attempts": 1,
+                "last_error": "validation_failed: spike.probe_scope must be a non-empty list",
+            })
             workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
             workflow["spike_elapsed_seconds"] = 15.2
             runtime._save_project(project)
@@ -1248,10 +1290,11 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
 
             saved = runtime._project()["workflow"]
             saved_spike = next(item for item in saved["phases"] if item["id"] == "spike:q1")
-            self.assertEqual(saved_spike["attempts"], 1)
+            self.assertEqual(saved_spike["attempts"], 2)
+            self.assertEqual(saved_spike["local_repair_attempts"], 1)
             self.assertEqual(saved["mode"], "feasibility_spike")
             self.assertEqual(runtime.requested_model, "openai/gpt-5.6-luna")
-            self.assertIn("feasibility Spike", runtime.run.call_args.args[0])
+            self.assertIn("Host rejected the current Spike artifacts", runtime.run.call_args.args[0])
             runtime.runner.cancel()
 
     async def test_orphaned_running_v3_project_loads_as_paused(self) -> None:

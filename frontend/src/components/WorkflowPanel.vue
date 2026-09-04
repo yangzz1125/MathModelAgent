@@ -44,6 +44,7 @@ interface TaskStatus {
 		status: PhaseStatus;
 		attempts?: number;
 		protocol_attempts?: number;
+		local_repair_attempts?: number;
 		review_attempts?: number;
 		replan_attempts?: number;
 		review_status?: string;
@@ -159,6 +160,7 @@ onBeforeUnmount(() => {
                 <span v-if="phase.spike_budget_seconds"> · 探针 ≤ {{ phase.spike_budget_seconds }}s</span>
                 <span v-if="phase.reused_from_version"> · 复用 v{{ phase.reused_from_version }}</span>
                 <span v-if="phase.protocol_attempts"> · 协议重试 {{ phase.protocol_attempts }}</span>
+                <span v-if="phase.local_repair_attempts"> · 局部修复 {{ phase.local_repair_attempts }}</span>
                 <span v-if="phase.review_attempts"> · 审查 {{ phase.review_attempts }}</span>
                 <span v-if="phase.replan_attempts"> · 重规划 {{ phase.replan_attempts }}</span>
               </div>

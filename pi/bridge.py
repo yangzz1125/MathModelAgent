@@ -74,6 +74,7 @@ from pi.staged_workflow import (
     scientific_review_prompt,
     spike_budget,
     spike_prompt,
+    spike_repair_prompt,
     stage_scope_errors,
     validate_execution_plan,
     validate_method_card,
@@ -100,6 +101,7 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_PROJECT_BYTES = 500 * 1024 * 1024
 RPC_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 MAX_VERIFY_REPAIRS = 2
+MAX_SPIKE_REPAIRS = 2
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 SCAFFOLD_DIRS = ("reports", "code", "results", "figures", "paper", "planning")
@@ -1026,6 +1028,13 @@ class TaskRuntime:
         if mode == "feasibility_spike":
             card = self._method_card(workflow)
             if card:
+                if int(phase.get("local_repair_attempts") or 0):
+                    return spike_repair_prompt(
+                        card,
+                        errors,
+                        supplemental=bool(workflow.get("supplemental_spike")),
+                        supplemental_ids=list(workflow.get("supplemental_spike_ids") or []),
+                    )
                 return spike_prompt(
                     card,
                     supplemental=bool(workflow.get("supplemental_spike")),
@@ -2456,6 +2465,8 @@ class TaskRuntime:
             )
             phase["status"] = "running" if kind == "method" else "pending"
             phase["last_error"] = "; ".join(review.get("issues") or [])[:2000]
+            if kind == "spike":
+                phase.pop("local_repair_attempts", None)
             if kind == "method":
                 phase["attempts"] = int(phase.get("attempts") or 0) + 1
                 phase["started_at"] = _now()
@@ -2678,6 +2689,47 @@ class TaskRuntime:
             return
         await self._complete_current(project, card)
 
+    async def _retry_spike_v3(
+        self, project: dict[str, Any], errors: list[str]
+    ) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        card = self._method_card(workflow)
+        repairable = errors and all(
+            error.startswith(("validation_failed:", "performance_budget:"))
+            for error in errors
+        )
+        if not phase or not card or not repairable:
+            await self._wait_with_errors(errors)
+            return
+        repairs = int(phase.get("local_repair_attempts") or 0)
+        if repairs >= MAX_SPIKE_REPAIRS:
+            await self._wait_with_errors([
+                f"spike_repair_exhausted: {error}" for error in errors
+            ])
+            return
+        phase["local_repair_attempts"] = repairs + 1
+        phase["attempts"] = int(phase.get("attempts") or 1) + 1
+        phase["started_at"] = _now()
+        phase["last_error"] = "; ".join(errors)[:2000]
+        workflow["mode"] = "feasibility_spike"
+        workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+        project["status"] = "running"
+        self._save_project(project)
+        await self.system(
+            f"Spike 格式或证据门禁未通过，Luna 正在执行同版本局部修复 {repairs + 1}/{MAX_SPIKE_REPAIRS}",
+            "warning",
+        )
+        try:
+            await self.prompt(spike_repair_prompt(
+                card,
+                errors,
+                supplemental=bool(workflow.get("supplemental_spike")),
+                supplemental_ids=list(workflow.get("supplemental_spike_ids") or []),
+            ))
+        except Exception as exc:
+            await self._wait_with_errors([f"rpc_error: Spike local repair failed: {exc}"])
+
     async def _finish_spike_v3(
         self, project: dict[str, Any], spike: dict[str, Any]
     ) -> None:
@@ -2894,16 +2946,7 @@ class TaskRuntime:
             return
         if stage.startswith("spike:"):
             if errors:
-                phase = next(
-                    item for item in workflow["phases"]
-                    if item["id"] == f"method:{self._phase_problem_id(workflow)}"
-                )
-                if int(phase.get("attempts") or 1) >= 3:
-                    await self._wait_with_errors(errors)
-                else:
-                    await self._restart_v3_problem_planning(
-                        project, {"issues": errors, "required_repairs": errors}
-                    )
+                await self._retry_spike_v3(project, errors)
             else:
                 assert artifact is not None
                 await self._finish_spike_v3(project, artifact)
@@ -3324,6 +3367,7 @@ async def task_status(task_id: str, request: Request) -> dict[str, Any]:
                 "label": str(item.get("label") or item.get("id") or ""),
                 "status": str(item.get("status") or "pending"),
                 "attempts": int(item.get("attempts") or 0),
+                "local_repair_attempts": int(item.get("local_repair_attempts") or 0),
                 "protocol_attempts": int(item.get("protocol_attempts") or 0),
                 "review_attempts": int(item.get("review_attempts") or 0),
                 "replan_attempts": int(item.get("replan_attempts") or 0),

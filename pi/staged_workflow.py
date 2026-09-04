@@ -1091,6 +1091,30 @@ Write only planning/methods/{problem_id}/v{version}/spike{suffix}/. Put executab
 spike_report.json has exactly schema_version=1, status='candidate', problem_id, method_spec_sha256='{card['method_spec_sha256']}', budget_seconds, actual_runtime_seconds, answered_question_ids, probe_scope, benchmarks, estimated_full_runtime_seconds, peak_memory_mb, witnesses, unresolved_risks, and artifact_paths. answered_question_ids and probe_scope contain planned question/case IDs. Each benchmark adds metric_id to name, operations, seconds, throughput, unit; each witness adds witness_id to type, summary, artifact_paths.{target_note} Every artifact, including probe.py and witness files, must be listed and stay inside this Spike directory. Timeout or process failure is numerical/planning feasibility evidence, never mathematical infeasibility or a domain event. Stop after writing the candidate report."""
 
 
+def spike_repair_prompt(
+    card: dict[str, Any],
+    errors: list[str],
+    *,
+    supplemental: bool = False,
+    supplemental_ids: list[str] | None = None,
+) -> str:
+    problem_id = card["problem_id"]
+    version = card["proposal_version"]
+    suffix = "/supplemental" if supplemental else ""
+    details = "\n".join(f"- {error}" for error in errors)
+    target_note = (
+        f"Cover exactly these planned IDs: {supplemental_ids}."
+        if supplemental
+        else "Cover every planned Spike ID exactly once."
+    )
+    return f"""The Host rejected the current Spike artifacts for {problem_id}. Repair only planning/methods/{problem_id}/v{version}/spike{suffix}/ under the same immutable Method Card; do not create a new Method Card or modify input, accepted dependencies, code, results, figures, reports, or execution_plan.json.
+
+Gate evidence:
+{details}
+
+Re-read the current probe.py, spike_report.json, witness files, and planning/methods/{problem_id}/v{version}/method_card.json. Correct the rejected schema, coverage, artifact declaration, or bounded probe evidence without changing measured values dishonestly. Reuse valid existing computation and rerun only the smallest missing check within the remaining budget. {target_note} A timeout or failed probe remains numerical/planning feasibility evidence, never mathematical infeasibility. Stop after the repaired Spike artifacts exist."""
+
+
 def method_audit_prompt(
     inventory_problem: dict[str, Any], card: dict[str, Any], spike: dict[str, Any]
 ) -> str:
