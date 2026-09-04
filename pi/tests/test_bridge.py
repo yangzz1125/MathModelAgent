@@ -796,10 +796,38 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 "proposal_version": 1,
                 "method_spec_sha256": "a" * 64,
                 "problem": {"runtime_limit_seconds": 120},
+                "spike_spec": {
+                    "questions": [{"id": "q", "description": "question"}],
+                    "representative_cases": [{"id": "c", "description": "case"}],
+                    "required_metrics": [{"id": "m", "description": "metric"}],
+                    "required_witnesses": [{"id": "w", "description": "witness"}],
+                },
             })
             self.assertIn('"probe_scope": ["planned representative-case IDs only"]', spike_text)
             self.assertIn("never put question IDs in `probe_scope`", spike_text)
             self.assertIn("`throughput = operations / seconds` within 5%", spike_text)
+            supplemental_text = spike_prompt(
+                {
+                    "problem_id": "q1",
+                    "proposal_version": 1,
+                    "method_spec_sha256": "a" * 64,
+                    "problem": {"runtime_limit_seconds": 120},
+                    "spike_spec": {
+                        "questions": [{"id": "q", "description": "question"}],
+                        "representative_cases": [{"id": "c", "description": "case"}],
+                        "required_metrics": [{"id": "m", "description": "metric"}],
+                        "required_witnesses": [{"id": "w", "description": "witness"}],
+                    },
+                },
+                supplemental=True,
+                supplemental_ids=["q"],
+            )
+            self.assertIn(
+                '"answered_question_ids": ["q"], "probe_scope": [], '
+                '"benchmark_metric_ids": [], "witness_ids": []',
+                supplemental_text,
+            )
+            self.assertIn("do not copy, carry forward, rename, or invent", supplemental_text)
             self.assertIn(
                 "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
                 method_prompt,

@@ -1168,10 +1168,30 @@ def spike_prompt(
     budget = 60 if supplemental else spike_budget(card["problem"]["runtime_limit_seconds"])
     payload = json.dumps(card, ensure_ascii=False, indent=2)
     scope = _evidence_scope(evidence_paths)
+    selected_ids = set(supplemental_ids or []) if supplemental else None
+    coverage = {
+        "answered_question_ids": [
+            item["id"] for item in card["spike_spec"]["questions"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "probe_scope": [
+            item["id"] for item in card["spike_spec"]["representative_cases"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "benchmark_metric_ids": [
+            item["id"] for item in card["spike_spec"]["required_metrics"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "witness_ids": [
+            item["id"] for item in card["spike_spec"]["required_witnesses"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+    }
+    exact_coverage = json.dumps(coverage, ensure_ascii=False)
     target_note = (
-        f" For this supplemental Spike, cover exactly these planned IDs: {supplemental_ids}."
+        f" This supplemental Spike has this exact coverage: {exact_coverage}. Empty categories stay empty; do not copy, carry forward, rename, or invent unselected IDs."
         if supplemental
-        else " Cover every planned Spike ID exactly once."
+        else f" Use this exact coverage: {exact_coverage}."
     )
     return f"""Run one {'supplemental ' if supplemental else ''}feasibility Spike for {problem_id}. This is planning evidence, not a formal solution. Use this Host-owned evidence scope:
 {scope}
@@ -1214,8 +1234,29 @@ def spike_repair_prompt(
     version = card["proposal_version"]
     suffix = "/supplemental" if supplemental else ""
     details = "\n".join(f"- {error}" for error in errors)
+    selected_ids = set(supplemental_ids or []) if supplemental else None
+    coverage = {
+        "answered_question_ids": [
+            item["id"] for item in card["spike_spec"]["questions"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "probe_scope": [
+            item["id"] for item in card["spike_spec"]["representative_cases"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "benchmark_metric_ids": [
+            item["id"] for item in card["spike_spec"]["required_metrics"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+        "witness_ids": [
+            item["id"] for item in card["spike_spec"]["required_witnesses"]
+            if selected_ids is None or item["id"] in selected_ids
+        ],
+    }
     target_note = (
-        f"Cover exactly these planned IDs: {supplemental_ids}."
+        "This supplemental Spike has this exact coverage: "
+        f"{json.dumps(coverage, ensure_ascii=False)}. Empty categories stay empty; "
+        "do not copy, carry forward, rename, or invent unselected IDs."
         if supplemental
         else "Cover every planned Spike ID exactly once."
     )
