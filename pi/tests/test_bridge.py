@@ -1,10 +1,13 @@
 """Tests for the Pi bridge's deterministic local behavior."""
 
 import asyncio
+import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
+import uuid
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,20 +40,28 @@ from pi.scientific_review import (
     merge_plan_revision,
     paper_plan_frozen_errors,
     paper_source_errors,
+    parse_method_review,
     parse_review,
+    plan_completeness_receipt,
     validate_paper_manifest,
     validate_paper_plan,
 )
 from pi.staged_workflow import (
     ContractError,
     artifact_hashes,
+    canonical_hash,
     expand_problem_phases,
     frozen_errors,
     initial_workflow,
+    method_version_dir,
     plan_revision_prompt,
     result_errors,
+    spike_budget,
     stage_scope_errors,
     validate_execution_plan,
+    validate_method_card,
+    validate_problem_inventory,
+    validate_spike_report,
     workspace_hashes,
 )
 
@@ -475,6 +486,914 @@ class StagedWorkflowContractTest(unittest.TestCase):
             self.assertEqual(frozen_errors(workspace, frozen), [
                 "artifact_changed: frozen artifacts for q1"
             ])
+
+
+class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
+    def _write(self, path: Path, value: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def _inventory(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "problems": [{
+                "id": "q1",
+                "label": "Problem 1",
+                "depends_on": [],
+                "requested_outputs": [{
+                    "id": "q1.output",
+                    "statement": "optimal decision and objective",
+                }],
+                "input_paths": ["input/problem.md", "input_manifest.json"],
+                "interpretation": "Use the stated continuous decision variables.",
+                "ambiguities": [],
+                "suggested_evidence_level": "B_bounded_numerical",
+            }],
+        }
+
+    def _workspace(self, directory: str) -> Path:
+        workspace = Path(directory)
+        for name in ("input", "reports", "planning", "code", "results", "figures", "paper"):
+            (workspace / name).mkdir(parents=True)
+        (workspace / "input" / "problem.md").write_text("problem", encoding="utf-8")
+        self._write(workspace / "input_manifest.json", {"problem_file": "input/problem.md"})
+        self._write(
+            workspace / "planning" / "inventory" / "v1" / "problem_inventory.json",
+            self._inventory(),
+        )
+        (workspace / "reports" / "PROBLEM_INVENTORY_v1.md").write_text(
+            "# Inventory\n", encoding="utf-8"
+        )
+        return workspace
+
+    def _card(self, inventory: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "inventory_sha256": canonical_hash(inventory),
+            "proposal_version": 1,
+            "problem_id": "q1",
+            "problem": {
+                "id": "q1",
+                "label": "Problem 1",
+                "depends_on": [],
+                "method": "Enumerate the finite feasible vertices.",
+                "inputs": ["input/problem.md"],
+                "outputs": [
+                    "code/q1/solve.py",
+                    "results/q1/result.json",
+                    "reports/q1_RESULTS.md",
+                ],
+                "validation": ["Independent vertex enumeration"],
+                "runtime_limit_seconds": 60,
+                "requested_outputs": ["optimal decision and objective"],
+                "interpretation": "Use the stated continuous decision variables.",
+                "assumptions": [],
+                "claims": [{
+                    "id": "q1.objective",
+                    "type": "optimality",
+                    "statement": "The reported decision is optimal on the finite feasible polygon.",
+                    "evidence_required": ["all feasible vertices"],
+                    "acceptance": {
+                        "criterion": "No enumerated feasible vertex is better.",
+                        "tolerance": 1e-9,
+                    },
+                    "evidence_level": "B_bounded_numerical",
+                    "requested_output_ids": ["q1.output"],
+                    "limitations": ["Valid only on the finite stated feasible polygon."],
+                }],
+                "approximations": [],
+                "failure_semantics": [{
+                    "id": "q1.failure.enumeration",
+                    "event_id": "q1.event.enumeration_failure",
+                    "category": "numerical_failure",
+                    "condition": "enumeration process fails",
+                    "action": "repair the implementation",
+                }],
+                "independent_validation": [{
+                    "id": "q1.check",
+                    "method": "Enumerate intersections using a separate implementation.",
+                    "independent_from": "primary active-set enumeration",
+                    "claims": ["q1.objective"],
+                }],
+                "figure_specs": [],
+            },
+            "finite_domain": "All pairwise intersections of the stated linear constraints.",
+            "witness_strategy": "Retain the best feasible vertex and its residuals.",
+            "gap_or_tail_exclusion": "The finite vertex list exhausts the feasible polygon.",
+            "cost_model": {
+                "operation": "constraint-pair intersection",
+                "estimated_operations": 20,
+                "estimated_seconds": 0.1,
+                "memory_mb": 1,
+                "scaling": "quadratic in the number of constraints",
+            },
+            "spike_spec": {
+                "questions": [{"id": "q1.spike.question", "description": "Does the kernel return feasible vertices?"}],
+                "representative_cases": [{"id": "q1.spike.case", "description": "Full constraint set"}],
+                "required_metrics": [{"id": "q1.spike.metric", "description": "Intersection throughput"}],
+                "required_witnesses": [{"id": "q1.spike.witness", "description": "One feasible vertex"}],
+            },
+        }
+
+    def _write_card(self, workspace: Path, inventory: dict[str, object]) -> dict[str, object]:
+        card = self._card(inventory)
+        directory = method_version_dir(workspace, "q1", 1)
+        self._write(directory / "method_card.json", card)
+        (workspace / "reports" / "q1_METHOD_v1.md").write_text("# Method\n", encoding="utf-8")
+        return card
+
+    def _write_spike(self, workspace: Path, normalized_card: dict[str, object]) -> None:
+        directory = method_version_dir(workspace, "q1", 1) / "spike"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "probe.py").write_text("print('probe')\n", encoding="utf-8")
+        self._write(directory / "witness.json", {"x": 1})
+        prefix = directory.relative_to(workspace).as_posix()
+        self._write(directory / "spike_report.json", {
+            "schema_version": 1,
+            "status": "candidate",
+            "problem_id": "q1",
+            "method_spec_sha256": normalized_card["method_spec_sha256"],
+            "budget_seconds": 20,
+            "actual_runtime_seconds": 0.1,
+            "answered_question_ids": ["q1.spike.question"],
+            "probe_scope": ["q1.spike.case"],
+            "benchmarks": [{
+                "metric_id": "q1.spike.metric",
+                "name": "intersections",
+                "operations": 20,
+                "seconds": 0.1,
+                "throughput": 200,
+                "unit": "intersections/s",
+            }],
+            "estimated_full_runtime_seconds": 0.1,
+            "peak_memory_mb": 1,
+            "witnesses": [{
+                "witness_id": "q1.spike.witness",
+                "type": "feasible_point",
+                "summary": "A feasible vertex was found.",
+                "artifact_paths": [f"{prefix}/witness.json"],
+            }],
+            "unresolved_risks": [],
+            "artifact_paths": [f"{prefix}/probe.py", f"{prefix}/witness.json"],
+        })
+
+    def _accepted_review(self, review_type: str, problem_id: str | None) -> str:
+        return json.dumps({
+            "schema_version": 1,
+            "review_type": review_type,
+            "problem_id": problem_id,
+            "verdict": "accept",
+            "statement_alignment": "pass",
+            "method_validity": "pass",
+            "implementation_fidelity": "pass",
+            "evidence_sufficiency": "pass",
+            "issue_class": "none",
+            "issues": [],
+            "required_repairs": [],
+        })
+
+    def _method_review(self) -> str:
+        return json.dumps({
+            "schema_version": 1,
+            "review_type": "method",
+            "problem_id": "q1",
+            "verdict": "accept",
+            "statement_alignment": "pass",
+            "method_validity": "pass",
+            "computational_feasibility": "pass",
+            "evidence_calibration": "pass",
+            "validation_independence": "pass",
+            "dependency_consistency": "pass",
+            "figure_contract": "pass",
+            "issue_class": "none",
+            "issues": [],
+            "required_repairs": [],
+            "supplemental_spike": False,
+            "supplemental_spike_ids": [],
+            "allowed_downgrades": [],
+        })
+
+    def test_v3_phase_order_interleaves_planning_and_execution(self) -> None:
+        workflow = initial_workflow(
+            {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+            {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+            contract_version=3,
+        )
+        inventory = self._inventory()
+        q2 = json.loads(json.dumps(inventory["problems"][0]))  # type: ignore[index]
+        q2.update({
+            "id": "q2",
+            "label": "Problem 2",
+            "depends_on": ["q1"],
+            "requested_outputs": [{"id": "q2.output", "statement": "dependent output"}],
+        })
+        inventory["problems"].append(q2)  # type: ignore[union-attr]
+        expand_problem_phases(workflow, inventory)
+        self.assertEqual(
+            [phase["id"] for phase in workflow["phases"]],
+            [
+                "inventory", "inventory_audit",
+                "method:q1", "spike:q1", "method_audit:q1", "problem:q1",
+                "method:q2", "spike:q2", "method_audit:q2", "problem:q2",
+                "paper_planning", "diagram", "writing", "verify",
+            ],
+        )
+
+    def test_inventory_method_and_spike_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            self.assertEqual(inventory["problems"][0]["requested_outputs"][0]["id"], "q1.output")
+            self._write_card(workspace, inventory)
+            card = validate_method_card(workspace, inventory, "q1", 1)
+            self.assertEqual(len(card["method_spec_sha256"]), 64)
+            self.assertEqual(spike_budget(60), 20)
+            self._write_spike(workspace, card)
+            report = validate_spike_report(workspace, card)
+            self.assertEqual(report["status"], "candidate")
+
+    def test_level_c_cannot_cover_requested_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            card = self._card(inventory)
+            card["problem"]["claims"][0]["evidence_level"] = "C_exploratory"  # type: ignore[index]
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", card)
+            with self.assertRaisesRegex(ContractError, "exploratory evidence"):
+                validate_method_card(workspace, inventory, "q1", 1)
+
+    def test_inventory_dependency_and_read_only_audit_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            invalid = self._inventory()
+            invalid["problems"][0]["depends_on"] = ["q2"]  # type: ignore[index]
+            self._write(inventory_path := workspace / "planning" / "inventory" / "v1" / "problem_inventory.json", invalid)
+            with self.assertRaisesRegex(ContractError, "dependency order"):
+                validate_problem_inventory(workspace, 1)
+            self._write(inventory_path, self._inventory())
+            baseline = workspace_hashes(workspace)
+            (workspace / "reports" / "reviewer-write.md").write_text("forbidden", encoding="utf-8")
+            self.assertTrue(stage_scope_errors(
+                workspace, baseline, "inventory_audit", planning_version=1
+            ))
+
+    def test_targeted_supplemental_spike_uses_requested_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            self._write_card(workspace, inventory)
+            card = validate_method_card(workspace, inventory, "q1", 1)
+            directory_path = method_version_dir(workspace, "q1", 1) / "spike" / "supplemental"
+            directory_path.mkdir(parents=True)
+            (directory_path / "probe.py").write_text("print('metric')\n", encoding="utf-8")
+            prefix = directory_path.relative_to(workspace).as_posix()
+            self._write(directory_path / "spike_report.json", {
+                "schema_version": 1,
+                "status": "candidate",
+                "problem_id": "q1",
+                "method_spec_sha256": card["method_spec_sha256"],
+                "budget_seconds": 10,
+                "actual_runtime_seconds": 0.1,
+                "answered_question_ids": [],
+                "probe_scope": [],
+                "benchmarks": [{
+                    "metric_id": "q1.spike.metric",
+                    "name": "intersections",
+                    "operations": 20,
+                    "seconds": 0.1,
+                    "throughput": 200,
+                    "unit": "intersections/s",
+                }],
+                "estimated_full_runtime_seconds": 0.1,
+                "peak_memory_mb": 1,
+                "witnesses": [],
+                "unresolved_risks": [],
+                "artifact_paths": [f"{prefix}/probe.py"],
+            })
+            result = validate_spike_report(
+                workspace,
+                card,
+                supplemental=True,
+                supplemental_ids={"q1.spike.metric"},
+            )
+            self.assertEqual(result["benchmarks"][0]["metric_id"], "q1.spike.metric")
+            with self.assertRaisesRegex(ContractError, "IDs are missing or invalid"):
+                validate_spike_report(
+                    workspace,
+                    card,
+                    supplemental=True,
+                    supplemental_ids={"q1.spike.unknown"},
+                )
+
+    def test_supplemental_scope_cannot_modify_primary_spike(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            baseline = workspace_hashes(workspace)
+            primary = workspace / "planning" / "methods" / "q1" / "v1" / "spike" / "primary.txt"
+            supplemental = primary.parent / "supplemental" / "extra.txt"
+            primary.parent.mkdir(parents=True, exist_ok=True)
+            supplemental.parent.mkdir(parents=True, exist_ok=True)
+            primary.write_text("changed", encoding="utf-8")
+            supplemental.write_text("allowed", encoding="utf-8")
+            errors = stage_scope_errors(
+                workspace,
+                baseline,
+                "spike:q1",
+                planning_version=1,
+                supplemental_spike=True,
+            )
+            self.assertTrue(any("primary.txt" in error for error in errors))
+            self.assertFalse(any("extra.txt" in error for error in errors))
+
+    def test_method_review_rejects_illegal_downgrade(self) -> None:
+        review = json.loads(self._method_review())
+        review.update({
+            "verdict": "revise",
+            "evidence_calibration": "fail",
+            "issue_class": "evidence",
+            "issues": ["proof level is unaffordable"],
+            "required_repairs": ["calibrate the claim"],
+            "allowed_downgrades": [{
+                "claim_id": "q1.objective",
+                "from": "B_bounded_numerical",
+                "to": "C_exploratory",
+                "reason": "too costly",
+            }],
+        })
+        with self.assertRaisesRegex(ScientificContractError, "only A_certified"):
+            parse_method_review(json.dumps(review), problem_id="q1")
+
+    def _runtime_at_method_audit(
+        self, directory: str, *, evidence_level: str = "B_bounded_numerical"
+    ) -> TaskRuntime:
+        workspace = self._workspace(directory)
+        inventory = validate_problem_inventory(workspace, 1)
+        raw_card = self._card(inventory)
+        raw_card["problem"]["claims"][0]["evidence_level"] = evidence_level  # type: ignore[index]
+        raw_card["problem"]["claims"][0]["limitations"] = (  # type: ignore[index]
+            [] if evidence_level == "A_certified" else ["Finite-domain numerical result."]
+        )
+        self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw_card)
+        (workspace / "reports" / "q1_METHOD_v1.md").write_text("# Method\n", encoding="utf-8")
+        card = validate_method_card(workspace, inventory, "q1", 1)
+        self._write_spike(workspace, card)
+        workflow = initial_workflow(
+            {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+            {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+            contract_version=3,
+        )
+        expand_problem_phases(workflow, inventory)
+        for phase in workflow["phases"][:4]:
+            phase["status"] = "completed"
+        audit_phase = workflow["phases"][4]
+        audit_phase.update({"status": "running", "attempts": 1})
+        workflow.update({
+            "current": "method_audit:q1",
+            "mode": "method_audit",
+            "inventory_version": 1,
+        })
+        inventory_file = workspace / "planning" / "inventory" / "v1" / "problem_inventory.json"
+        self._write(workspace / "planning" / "ledger.json", {
+            "schema_version": 1,
+            "inventory": {
+                "version": 1,
+                "status": "accepted",
+                "path": inventory_file.relative_to(workspace).as_posix(),
+                "sha256": hashlib.sha256(inventory_file.read_bytes()).hexdigest(),
+            },
+            "problems": {
+                "q1": {
+                    "proposal_version": 1,
+                    "status": "candidate",
+                    "method_spec_sha256": card["method_spec_sha256"],
+                    "spike_source_version": 1,
+                    "ordinary_audits": 0,
+                    "supplemental_used": False,
+                    "superseded_versions": [],
+                }
+            },
+            "plan_version": 0,
+        })
+        snapshot = workspace_hashes(workspace)
+        workflow["stage_snapshot"] = snapshot
+        workflow["review_snapshot"] = snapshot
+        self._write(workspace / "project.json", {
+            "status": "running",
+            "problem_file": "input/problem.md",
+            "competition": "MCM",
+            "language": "English",
+            "paper_engine": "LaTeX",
+            "workflow": workflow,
+        })
+        runtime = TaskRuntime("f" * 12, workspace, status="running")
+        runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+        runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+        runtime.system = AsyncMock()  # type: ignore[method-assign]
+        return runtime
+
+    def test_method_spec_hash_ignores_claim_wording_but_not_method(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            raw = self._card(inventory)
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw)
+            first = validate_method_card(workspace, inventory, "q1", 1)
+            raw["problem"]["claims"][0]["statement"] = "Calibrated claim wording."  # type: ignore[index]
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw)
+            wording_only = validate_method_card(workspace, inventory, "q1", 1)
+            self.assertEqual(first["method_spec_sha256"], wording_only["method_spec_sha256"])
+            raw["problem"]["method"] = "A different executable method."  # type: ignore[index]
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw)
+            changed = validate_method_card(workspace, inventory, "q1", 1)
+            self.assertNotEqual(first["method_spec_sha256"], changed["method_spec_sha256"])
+
+    def test_contradictory_failure_semantics_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            card = self._card(inventory)
+            card["problem"]["failure_semantics"] = [  # type: ignore[index]
+                {
+                    "id": "q1.failure.first_contact_domain",
+                    "event_id": "q1.event.first_contact",
+                    "category": "domain_event",
+                    "condition": "first contact occurs",
+                    "action": "report the event",
+                },
+                {
+                    "id": "q1.failure.first_contact_math",
+                    "event_id": "q1.event.first_contact",
+                    "category": "mathematical_infeasibility",
+                    "condition": "non-adjacent benches first touch",
+                    "action": "stop as infeasible",
+                },
+            ]
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", card)
+            with self.assertRaisesRegex(ContractError, "conflicting categories"):
+                validate_method_card(workspace, inventory, "q1", 1)
+
+    def test_spike_must_cover_every_planned_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            self._write_card(workspace, inventory)
+            card = validate_method_card(workspace, inventory, "q1", 1)
+            self._write_spike(workspace, card)
+            report_path = method_version_dir(workspace, "q1", 1) / "spike" / "spike_report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["benchmarks"][0]["metric_id"] = "q1.spike.unrelated"
+            self._write(report_path, report)
+            with self.assertRaisesRegex(ContractError, "metrics coverage mismatch"):
+                validate_spike_report(workspace, card)
+
+    async def test_failed_spike_is_not_reused_by_same_spec_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "spike:q1"
+            workflow["mode"] = "feasibility_spike"
+            spike_phase = next(item for item in workflow["phases"] if item["id"] == "spike:q1")
+            spike_phase.update({"status": "running", "attempts": 1})
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            spike_dir = method_version_dir(runtime.workspace, "q1", 1) / "spike"
+            for path in spike_dir.iterdir():
+                path.unlink()
+
+            await runtime._settled()
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 2)
+
+            inventory = validate_problem_inventory(runtime.workspace, 1)
+            revised = self._card(inventory)
+            revised["proposal_version"] = 2
+            self._write(method_version_dir(runtime.workspace, "q1", 2) / "method_card.json", revised)
+            (runtime.workspace / "reports" / "q1_METHOD_v2.md").write_text("# Same method\n", encoding="utf-8")
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "spike:q1")
+            self.assertFalse(any(
+                item.get("reused_from_version")
+                for item in saved["phases"]
+                if item["id"] == "spike:q1"
+            ))
+
+    async def test_inventory_audit_pending_transition_replays_partial_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            workflow = initial_workflow(
+                {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+                {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+                contract_version=3,
+            )
+            self._write(workspace / "planning" / "ledger.json", {
+                "schema_version": 1,
+                "inventory": {"version": 1, "status": "candidate"},
+                "problems": {},
+                "plan_version": 0,
+            })
+            workflow["phases"][0]["status"] = "completed"
+            workflow["phases"][1].update({"status": "running", "attempts": 1})
+            workflow["current"] = "inventory_audit"
+            workflow["mode"] = "inventory_audit"
+            snapshot = workspace_hashes(workspace)
+            workflow["stage_snapshot"] = snapshot
+            workflow["review_snapshot"] = snapshot
+            review = json.loads(self._accepted_review("inventory", None))
+            workflow["pending_transition"] = {
+                "kind": "inventory_audit",
+                "stage": "inventory_audit",
+                "review": review,
+                "ledger_before": {
+                    "schema_version": 1,
+                    "inventory": {"version": 1, "status": "candidate"},
+                    "problems": {},
+                    "plan_version": 0,
+                },
+            }
+            workflow["pending_transition"]["signature"] = bridge._transition_signature(
+                "f" * 12, workflow["pending_transition"]
+            )
+            self._write(workspace / "project.json", {
+                "status": "running",
+                "problem_file": "input/problem.md",
+                "competition": "MCM",
+                "language": "English",
+                "paper_engine": "LaTeX",
+                "workflow": workflow,
+            })
+            partial = json.loads(json.dumps(workflow["pending_transition"]["ledger_before"]))
+            partial["inventory"]["status"] = "accepted"
+            self._write(workspace / "planning" / "ledger.json", partial)
+            runtime = TaskRuntime("f" * 12, workspace, status="running")
+            runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "method:q1")
+            self.assertEqual(runtime._ledger()["inventory"]["status"], "accepted")
+            self.assertNotIn("pending_transition", saved)
+
+    async def test_rejected_method_audit_pending_transition_replays_to_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            review = json.loads(self._method_review())
+            review.update({
+                "verdict": "revise",
+                "method_validity": "fail",
+                "issue_class": "method",
+                "issues": ["The proposed method is not valid on the stated domain."],
+                "required_repairs": ["Use a bounded valid method."],
+            })
+            project = runtime._project()
+            transition = {
+                "kind": "method_audit",
+                "stage": "method_audit:q1",
+                "review": review,
+                "ledger_before": runtime._ledger(),
+            }
+            transition["signature"] = bridge._transition_signature(
+                runtime.task_id, transition
+            )
+            project["workflow"]["pending_transition"] = transition
+            runtime._save_project(project)
+            partial = runtime._ledger()
+            partial["problems"]["q1"]["ordinary_audits"] = 99
+            runtime._save_ledger(partial)
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "method:q1")
+            self.assertEqual(saved["mode"], "method_revision")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 2)
+            self.assertNotIn("pending_transition", saved)
+
+    async def test_reviewer_forged_pending_transition_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            project["workflow"]["pending_transition"] = {
+                "kind": "method_audit",
+                "stage": "method_audit:q1",
+                "review": json.loads(self._method_review()),
+                "ledger_before": runtime._ledger(),
+                "signature": "0" * 64,
+            }
+            runtime._save_project(project)
+            runtime._last_assistant_text = self._method_review()
+
+            await runtime._settled()
+
+            saved = runtime._project()
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn(
+                "invalid or forged",
+                saved["workflow"]["phases"][4]["last_error"],
+            )
+
+    async def test_reviewer_ledger_write_without_host_transition_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            ledger = runtime._ledger()
+            ledger["problems"]["q1"]["status"] = "accepted"
+            runtime._save_ledger(ledger)
+            runtime._last_assistant_text = self._method_review()
+
+            await runtime._settled()
+
+            saved = runtime._project()
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn(
+                "method reviewer modified workspace",
+                saved["workflow"]["phases"][4]["last_error"],
+            )
+
+    async def test_method_audit_pending_transition_replays_partial_host_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            review = json.loads(self._method_review())
+            project = runtime._project()
+            ledger_before = runtime._ledger()
+            project["workflow"]["pending_transition"] = {
+                "kind": "method_audit",
+                "stage": "method_audit:q1",
+                "review": review,
+                "ledger_before": ledger_before,
+            }
+            project["workflow"]["pending_transition"]["signature"] = bridge._transition_signature(
+                runtime.task_id, project["workflow"]["pending_transition"]
+            )
+            runtime._save_project(project)
+            partial_ledger = runtime._ledger()
+            partial_ledger["problems"]["q1"]["ordinary_audits"] = 99
+            runtime._save_ledger(partial_ledger)
+            audit_path = method_version_dir(runtime.workspace, "q1", 1) / "audit_1.json"
+            self._write(audit_path, review)
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "problem:q1")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["ordinary_audits"], 1)
+            self.assertNotIn("pending_transition", saved)
+
+    async def test_supplemental_spike_preserves_first_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            review = json.loads(self._method_review())
+            review.update({
+                "verdict": "revise",
+                "computational_feasibility": "fail",
+                "issue_class": "budget",
+                "issues": ["One kernel measurement is missing."],
+                "required_repairs": ["Benchmark the collision kernel."],
+                "supplemental_spike": True,
+                "supplemental_spike_ids": ["q1.spike.metric"],
+            })
+            runtime._last_assistant_text = json.dumps(review)
+            await runtime._settled()
+
+            workflow = runtime._project()["workflow"]
+            self.assertEqual(workflow["current"], "spike:q1")
+            self.assertTrue(workflow["supplemental_spike"])
+            self.assertTrue(
+                (runtime.workspace / "planning" / "methods" / "q1" / "v1" / "audit_1.json").is_file()
+            )
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["ordinary_audits"], 1)
+
+    async def test_exhausted_method_audit_allows_only_bounded_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory, evidence_level="A_certified")
+            project = runtime._project()
+            project["workflow"]["phases"][4]["attempts"] = 3
+            runtime._save_project(project)
+            review = json.loads(self._method_review())
+            review.update({
+                "verdict": "revise",
+                "evidence_calibration": "fail",
+                "issue_class": "evidence",
+                "issues": ["Certification is unnecessary and unaffordable."],
+                "required_repairs": ["Scope the result as bounded numerical evidence."],
+                "allowed_downgrades": [{
+                    "claim_id": "q1.objective",
+                    "from": "A_certified",
+                    "to": "B_bounded_numerical",
+                    "reason": "The requested output is numerical.",
+                }],
+            })
+            runtime._last_assistant_text = json.dumps(review)
+            await runtime._settled()
+            workflow = runtime._project()["workflow"]
+            self.assertEqual(workflow["mode"], "evidence_downgrade")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 2)
+
+            inventory = validate_problem_inventory(runtime.workspace, 1)
+            revised = self._card(inventory)
+            revised["proposal_version"] = 2
+            revised["problem"]["claims"][0]["statement"] = "The finite-domain estimate is best at the declared resolution."  # type: ignore[index]
+            revised["problem"]["claims"][0]["limitations"] = ["No claim is made outside the finite domain."]  # type: ignore[index]
+            self._write(method_version_dir(runtime.workspace, "q1", 2) / "method_card.json", revised)
+            (runtime.workspace / "reports" / "q1_METHOD_v2.md").write_text("# Bounded method\n", encoding="utf-8")
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "spike:q1")
+            spike_phase = next(item for item in saved["phases"] if item["id"] == "spike:q1")
+            self.assertFalse(spike_phase.get("reused_from_version"))
+
+    async def test_v3_pause_resume_keeps_spike_attempt_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "spike:q1"
+            workflow["mode"] = "feasibility_spike"
+            spike_phase = next(item for item in workflow["phases"] if item["id"] == "spike:q1")
+            spike_phase.update({"status": "running", "attempts": 1})
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            workflow["spike_elapsed_seconds"] = 15.2
+            runtime._save_project(project)
+            self.assertEqual(runtime._current_runtime_limit(), 5)
+            runtime.process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+            runtime.send_rpc = AsyncMock()  # type: ignore[method-assign]
+            runtime.terminate = AsyncMock()  # type: ignore[method-assign]
+
+            await runtime.pause()
+            runtime.process = None
+            runtime.run = AsyncMock()  # type: ignore[method-assign]
+            await runtime.resume()
+            await asyncio.sleep(0)
+
+            saved = runtime._project()["workflow"]
+            saved_spike = next(item for item in saved["phases"] if item["id"] == "spike:q1")
+            self.assertEqual(saved_spike["attempts"], 1)
+            self.assertEqual(saved["mode"], "feasibility_spike")
+            self.assertEqual(runtime.requested_model, "openai/gpt-5.6-luna")
+            self.assertIn("feasibility Spike", runtime.run.call_args.args[0])
+            runtime.runner.cancel()
+
+    async def test_orphaned_running_v3_project_loads_as_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = "1" * 12
+            workspace = Path(directory) / task_id
+            workspace.mkdir()
+            self._write(workspace / "project.json", {
+                "status": "running",
+                "runtime_owner_pid": 999999999,
+                "workflow": {
+                    "contract_version": 3,
+                    "current": "inventory",
+                    "mode": "inventory",
+                    "phases": [{"id": "inventory", "status": "running", "last_error": ""}],
+                },
+            })
+            TASKS.clear()
+            with patch.object(bridge, "WORKSPACES", Path(directory)):
+                runtime = bridge._runtime(task_id)
+            self.assertEqual(runtime.status, "paused")
+            self.assertEqual(runtime._project()["pause_reason"], "bridge_restart")
+            TASKS.clear()
+
+    async def test_v3_incremental_flow_reaches_paper_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            workflow = initial_workflow(
+                {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+                {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+                contract_version=3,
+            )
+            self._write(workspace / "planning" / "ledger.json", {
+                "schema_version": 1,
+                "inventory": {"version": 1, "status": "candidate"},
+                "problems": {},
+                "plan_version": 0,
+            })
+            workflow["stage_snapshot"] = workspace_hashes(workspace)
+            self._write(workspace / "project.json", {
+                "status": "running",
+                "problem_file": "input/problem.md",
+                "competition": "MCM",
+                "language": "English",
+                "paper_engine": "LaTeX",
+                "workflow": workflow,
+            })
+            runtime = TaskRuntime("f" * 12, workspace, status="running")
+            runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["mode"], "inventory_audit")
+            runtime._last_assistant_text = self._accepted_review("inventory", None)
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "method:q1")
+
+            inventory = validate_problem_inventory(workspace, 1)
+            self._write_card(workspace, inventory)
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "spike:q1")
+
+            card = validate_method_card(workspace, inventory, "q1", 1)
+            self._write_spike(workspace, card)
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "method_audit:q1")
+
+            runtime._last_assistant_text = self._method_review()
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "problem:q1")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["status"], "provisional")
+            plan = validate_execution_plan(workspace)
+            self.assertEqual(plan["problems"][0]["claims"][0]["evidence_level"], "B_bounded_numerical")
+
+            (workspace / "code" / "q1").mkdir()
+            (workspace / "results" / "q1").mkdir()
+            (workspace / "code" / "q1" / "solve.py").write_text("print(1)\n", encoding="utf-8")
+            (workspace / "reports" / "q1_RESULTS.md").write_text("candidate", encoding="utf-8")
+            self._write(workspace / "results" / "q1" / "evidence.json", {"value": 1})
+            self._write(workspace / "results" / "q1" / "result.json", {
+                "problem_id": "q1",
+                "status": "candidate",
+                "metrics": [{"name": "objective", "value": 1, "unit": "", "description": "test"}],
+            })
+            self._write(workspace / "results" / "q1" / "verification.json", {
+                "schema_version": 2,
+                "status": "candidate",
+                "smoke_runtime_seconds": 0.01,
+                "estimated_runtime_seconds": 0.1,
+                "actual_runtime_seconds": 0.1,
+                "checks": ["all vertices"],
+                "figures": [],
+                "claim_evidence": [{
+                    "claim_id": "q1.objective",
+                    "status": "supported",
+                    "independent": True,
+                    "method": "separate enumeration",
+                    "evidence_paths": ["results/q1/evidence.json"],
+                }],
+            })
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["mode"], "scientific_review")
+            accepted_text = self._accepted_review("scientific", "q1")
+            accepted_review = json.loads(accepted_text)
+            ledger_before = runtime._ledger()
+            project = runtime._project()
+            project["workflow"]["pending_transition"] = {
+                "kind": "scientific_review",
+                "stage": "problem:q1",
+                "review": accepted_review,
+                "ledger_before": ledger_before,
+            }
+            project["workflow"]["pending_transition"]["signature"] = bridge._transition_signature(
+                runtime.task_id, project["workflow"]["pending_transition"]
+            )
+            runtime._save_project(project)
+            review_path = workspace / "reports" / "q1_SCIENTIFIC_REVIEW.json"
+            review_path.write_text(
+                json.dumps(json.loads(accepted_text), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            ledger = runtime._ledger()
+            ledger["problems"]["q1"]["status"] = "accepted"
+            ledger["problems"]["q1"]["scientific_candidate_sha256"] = artifact_hashes(
+                workspace, "q1"
+            )
+            runtime._save_ledger(ledger)
+            runtime._last_assistant_text = accepted_text
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            self.assertEqual(saved["current"], "paper_planning", saved)
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["status"], "accepted")
+            receipt = json.loads(
+                (workspace / "reports" / "PLAN_COMPLETENESS.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(receipt["status"], "pass")
+            expected, errors = plan_completeness_receipt(
+                workspace, validate_execution_plan(workspace), runtime._ledger()
+            )
+            self.assertEqual(errors, [])
+            self.assertEqual(receipt, expected)
+            tampered = json.loads(json.dumps(validate_execution_plan(workspace)))
+            tampered["problems"][0]["method"] = "tampered"
+            _, tamper_errors = plan_completeness_receipt(
+                workspace, tampered, runtime._ledger()
+            )
+            self.assertTrue(any("differs from active method card" in error for error in tamper_errors))
+            spike_artifact = next(
+                path
+                for path in runtime._ledger()["problems"]["q1"]["spike"]["artifact_sha256"]
+                if path.endswith("witness.json")
+            )
+            (workspace / spike_artifact).write_text("tampered", encoding="utf-8")
+            _, spike_tamper_errors = plan_completeness_receipt(
+                workspace, validate_execution_plan(workspace), runtime._ledger()
+            )
+            self.assertTrue(any("spike artifact hash mismatch" in error for error in spike_tamper_errors))
 
 
 class BridgeHelpersTest(unittest.TestCase):
@@ -1493,6 +2412,220 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(project["workflow"]["phases"][0]["status"], "paused")
             TASKS.clear()
 
+    async def test_v3_host_boundary_requires_ledger(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows Host boundary only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "project.json").write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            runtime = TaskRuntime(uuid.uuid4().hex[:12], workspace)
+            with self.assertRaisesRegex(RuntimeError, "requires project.json and planning/ledger.json"):
+                runtime._acquire_host_state()
+
+    async def test_host_state_lock_blocks_same_user_file_mutation(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows mandatory sharing locks only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_path = workspace / "project.json"
+            ledger_path = workspace / "planning" / "ledger.json"
+            ledger_path.parent.mkdir()
+            project_path.write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": 1,
+                "inventory": {},
+                "problems": {},
+                "plan_version": 0,
+            }), encoding="utf-8")
+            runtime = TaskRuntime(uuid.uuid4().hex[:12], workspace)
+
+            runtime._acquire_host_state()
+            try:
+                with self.assertRaises(PermissionError):
+                    project_path.write_text("forged", encoding="utf-8")
+                with self.assertRaises(PermissionError):
+                    ledger_path.write_text("forged", encoding="utf-8")
+                project = runtime._project()
+                project["status"] = "paused"
+                runtime._save_project(project)
+                self.assertEqual(runtime._project()["status"], "paused")
+            finally:
+                runtime._release_host_state()
+            project_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(project_path.read_text(encoding="utf-8"), "{}")
+
+    async def test_host_journal_recovers_from_partial_latest_write(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows Host journal only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_path = workspace / "project.json"
+            ledger_path = workspace / "planning" / "ledger.json"
+            ledger_path.parent.mkdir()
+            project_path.write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": 1,
+                "inventory": {},
+                "problems": {},
+                "plan_version": 0,
+            }), encoding="utf-8")
+            runtime = TaskRuntime(uuid.uuid4().hex[:12], workspace)
+            runtime._acquire_host_state()
+            paused = runtime._project()
+            paused["status"] = "paused"
+            runtime._save_project(paused)
+            running = runtime._project()
+            running["status"] = "running"
+            runtime._save_project(running)
+            assert runtime._host_boundary
+            latest_slot = runtime._host_boundary.journal_paths[
+                runtime._host_boundary.generation % 2
+            ]
+            runtime._host_boundary._write_handle(latest_slot, b"{")
+            runtime._host_boundary._write_handle(project_path, b"{")
+            runtime._release_host_state()
+
+            bridge.WindowsHostBoundary.recover(runtime.task_id, workspace)
+
+            recovered = json.loads(project_path.read_text(encoding="utf-8"))
+            self.assertEqual(recovered["status"], "paused")
+
+    async def test_resume_mirror_is_checkpointed_not_rolled_back(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows Host journal only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_path = workspace / "project.json"
+            ledger_path = workspace / "planning" / "ledger.json"
+            ledger_path.parent.mkdir()
+            project_path.write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": 1,
+                "inventory": {},
+                "problems": {},
+                "plan_version": 0,
+            }), encoding="utf-8")
+            task_id = uuid.uuid4().hex[:12]
+            first = TaskRuntime(task_id, workspace)
+            first._acquire_host_state()
+            paused = first._project()
+            paused["status"] = "paused"
+            first._save_project(paused)
+            assert first._host_boundary
+            paused_generation = first._host_boundary.generation
+            first._release_host_state()
+
+            resumed = json.loads(project_path.read_text(encoding="utf-8"))
+            resumed["status"] = "starting"
+            resumed["resume_count"] = 1
+            project_path.write_text(json.dumps(resumed), encoding="utf-8")
+            second = TaskRuntime(task_id, workspace)
+            second._acquire_host_state()
+            try:
+                checkpointed = second._project()
+                self.assertEqual(checkpointed["status"], "starting")
+                self.assertEqual(checkpointed["resume_count"], 1)
+                assert second._host_boundary
+                self.assertGreater(
+                    second._host_boundary.generation, paused_generation
+                )
+            finally:
+                second._release_host_state()
+
+    async def test_preassignment_failure_kills_suspended_process_before_unlock(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows Job Objects only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_path = workspace / "project.json"
+            ledger_path = workspace / "planning" / "ledger.json"
+            ledger_path.parent.mkdir()
+            project_path.write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": 1,
+                "inventory": {},
+                "problems": {},
+                "plan_version": 0,
+            }), encoding="utf-8")
+            runtime = TaskRuntime(uuid.uuid4().hex[:12], workspace)
+            runtime._acquire_host_state()
+            runtime.process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+                creationflags=bridge.CREATE_NO_WINDOW | bridge.CREATE_SUSPENDED,
+            )
+            assert runtime._host_boundary
+            empty_job = runtime._host_boundary.kernel.CreateJobObjectW(None, None)
+            self.assertTrue(empty_job)
+            runtime._host_boundary.job_handle = int(empty_job)
+            runtime._host_boundary.job_assigned = False
+
+            await runtime.terminate()
+
+            self.assertIsNotNone(runtime.process.returncode)
+            project_path.write_text("{}", encoding="utf-8")
+
+    async def test_windows_job_kills_descendants_before_unlock(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows Job Objects only")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_path = workspace / "project.json"
+            ledger_path = workspace / "planning" / "ledger.json"
+            ledger_path.parent.mkdir()
+            project_path.write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": 1,
+                "inventory": {},
+                "problems": {},
+                "plan_version": 0,
+            }), encoding="utf-8")
+            runtime = TaskRuntime(uuid.uuid4().hex[:12], workspace)
+            runtime._acquire_host_state()
+            child_pid_file = workspace / "child.pid"
+            script = (
+                "import pathlib,subprocess,sys,time; "
+                "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(p.pid)); "
+                "time.sleep(60)"
+            )
+            runtime.process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                script,
+                creationflags=bridge.CREATE_NO_WINDOW | bridge.CREATE_SUSPENDED,
+            )
+            assert runtime._host_boundary
+            runtime._host_boundary.assign_and_resume(runtime.process.pid)
+            for _ in range(100):
+                if child_pid_file.is_file():
+                    break
+                await asyncio.sleep(0.02)
+            self.assertTrue(child_pid_file.is_file())
+            child_pid = int(child_pid_file.read_text())
+            await runtime.terminate()
+            self.assertFalse(bridge._pid_exists(child_pid))
+            project_path.write_text("{}", encoding="utf-8")
+
     async def test_rpc_stream_limit_accepts_large_jsonl_event(self) -> None:
         reader = asyncio.StreamReader(limit=RPC_STREAM_LIMIT_BYTES)
         payload = b'{"type":"event","text":"' + b"x" * 100_000 + b'"}\n'
@@ -1542,10 +2675,39 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 [call.args[0]["type"] for call in runtime.rpc_command.await_args_list],
-                ["new_session", "set_model", "set_thinking_level"],
+                ["new_session", "set_model", "set_thinking_level", "prompt"],
+            )
+            policy = runtime.rpc_command.await_args_list[-1].args[0]
+            self.assertEqual(
+                policy["message"],
+                f"/mathmodel-tool-policy {runtime._tool_policy_token} work",
             )
             self.assertEqual(runtime.model, "openai/gpt-5.6-sol")
             self.assertEqual(runtime.thinking_level, "high")
+
+    async def test_reviewer_session_switches_to_read_only_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "project.json").write_text(json.dumps({
+                "workflow": {
+                    "mode": "method_audit",
+                    "current": "method_audit:q1",
+                    "profiles": {"planner": {
+                        "model": "openai/gpt-5.6-sol", "thinking": "high"
+                    }},
+                }
+            }), encoding="utf-8")
+            runtime = TaskRuntime("a" * 12, workspace)
+            runtime.rpc_command = AsyncMock(return_value={"success": True})  # type: ignore[method-assign]
+
+            await runtime._switch_session("planner")
+
+            policy = runtime.rpc_command.await_args_list[-1].args[0]
+            self.assertEqual(policy["type"], "prompt")
+            self.assertEqual(
+                policy["message"],
+                f"/mathmodel-tool-policy {runtime._tool_policy_token} review",
+            )
 
     async def test_watchdog_aborts_only_current_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

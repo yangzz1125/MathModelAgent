@@ -8,8 +8,8 @@
 
 - Vue 导入、配置、任务页、文件下载、论文预览、暂停、恢复和终止。
 - Pi RPC bridge，默认 Sol high 负责规划/审查，Luna high 负责执行/写作。
-- Schema-v2 Planning → Plan Audit → Candidate → Scientific Review → Paper Planning → Diagram → Writing → Document Verification。
-- Host-only acceptance、严格 Reviewer JSON、受控重规划、修复预算、阶段边界、SHA-256 冻结和重启恢复。
+- Contract-v3 Problem Inventory → Inventory Audit → 逐问题 Method Card → Feasibility Spike → Method Audit → Candidate → Scientific Review → Paper Planning → Diagram → Writing → Document Verification。
+- Host-only acceptance、严格 Reviewer JSON、逐问题受控修订、A→B 降级授权、修复预算、阶段边界、SHA-256 lineage 和重启恢复。
 - `figure_specs`：Planner 预先声明 claim、目的、图型、reference、面板、编码、注释、尺寸和产物路径。
 - 31 项正式绘图参考，其中 12 项来自 Seaborn 官方 gallery，1 项专门表达首次事件认证括号；所有参考图均为 `evidence_eligible=false`。
 - 图表真实数据、生成器、矢量母版、PNG 预览、灰度和最终尺寸检查。
@@ -23,9 +23,20 @@
 4. 移除未实现的 zip 输入选项；继续支持文件夹和 PDF/Markdown/Text/CSV/XLSX/DOCX/PNG/JPEG。
 5. 将 12 个 Seaborn 网络模板提升为合法 `network-*` reference ID，同时禁止直接运行官方 demo 数据作为证据。
 
+## 本轮增量规划升级
+
+1. 新任务使用 contract-v3；Problem Inventory、Method Card、Spike 和 Method Audit 全部按问题/版本持久化，旧版本不覆盖。
+2. Reviewer Pi session 只激活 `read/grep/find/ls`；`bash/powershell/edit/write` 与 extension tools 从模型工具集合中移除，Host transaction marker 另有签名防篡改。
+3. 方法规划与正式执行逐问题交错；下游 Spike 可以读取已科学接受的上游代码和结果。
+4. evidence level 固定为 `A_certified`、`B_bounded_numerical`、`C_exploratory`；Level C 不能覆盖题面 requested output。
+5. 主 Spike 预算为正式问题预算的 10%，下限 20 秒、上限 120 秒；最多一次 60 秒补充探针，累计 bash 时间跨暂停持久化。
+6. Method Audit 初稿加最多两次普通定向修订；耗尽后默认失败，仅保留一次 Reviewer 明确授权、Host 校验的 A→B 校准。
+7. Host 增量组装 schema-v2 `execution_plan.json`，最终生成并复核 `reports/PLAN_COMPLETENESS.json`。
+8. contract-v1/v2 历史 workspace 不迁移，paused v2 继续原恢复路径；失败 A 题 workspace `3c2fd38e601b` 不恢复。
+
 ## 验证证据
 
-- `python -m unittest discover -s pi/tests -p 'test_*.py'`：69 tests passed。
+- `python -m unittest discover -s pi/tests -p 'test_*.py'`：98 tests passed（含 contract-v3、Reviewer capability、Host 双槽 journal/强制锁、Job Object 与失败注入测试）。
 - `validate_single_bakery.py workspaces/387f2e0b2668`：`SINGLE_BAKERY_PASS`。
 - 使用 `pdftoppm` 实际渲染已完成论文第一页：通过。
 - `python -m compileall`：通过。
@@ -67,11 +78,12 @@
 
 ## 运行中检查点
 
-- Planning 后应出现 schema-v2 `execution_plan.json`，每个问题含 `figure_specs`（无必要图时为 `[]`）。
-- Plan Audit 必须 accept 后才开始 q1。
-- 每个问题先产生 `candidate`，再由独立 Scientific Review accept。
+- Inventory 后应出现 versioned `planning/inventory/v<n>/problem_inventory.json`，Inventory Audit accept 后才开始 q1 方法设计。
+- 每个问题必须依次产生 Method Card、有限预算 Spike 和 Method Audit；Host 接受后才把该题追加到 schema-v2 `execution_plan.json`。
+- 每个 requested output 必须由 Level A 或 B claim 覆盖；Level C 只能作为补充探索。
+- 每个问题先产生正式 `candidate`，再由独立 Scientific Review accept。Spike 只能作为规划 benchmark，不能作为论文结果证据。
 - 图表 provenance 必须引用当前问题真实数据，不能引用 `skills/`、`previews/`、examples 或 `*_replica`。
-- 所有问题接受后才进入 Paper Planning。
+- 所有问题接受且 `reports/PLAN_COMPLETENESS.json` 通过后才进入 Paper Planning。
 - 最终只有 `reports/VERIFY_REPORT.md` 明确独立 `PASS` 且 PDF 可读时，任务才显示完成。
 
 ## 非阻塞风险
@@ -80,4 +92,5 @@
 - Draw.io 未安装；它是可选项，Diagram 阶段必须在不需要概念图时写明省略理由。
 - Typst 未安装；选择 Typst 会在 Start 前被明确拒绝。当前应选择 LaTeX。
 - 已暴露的 DeepSeek API key 轮换仍是外部待办；本仓库未检出该密钥。
-- 历史 workspaces 保留 completed/failed/cancelled/paused 证据；新真题会创建独立 workspace，不会复用它们。
+- 历史 workspaces 保留 completed/failed/cancelled/paused 证据；新真题会创建独立 contract-v3 workspace，不会复用它们。
+- 本次升级没有启动第二轮 A 题；Bridge 必须重启后，新任务才会加载 contract-v3。

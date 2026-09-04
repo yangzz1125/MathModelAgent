@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -32,18 +34,31 @@ from pi.scientific_review import (
     merge_plan_revision,
     paper_plan_frozen_errors,
     paper_source_errors,
+    parse_method_review,
     parse_review,
+    plan_completeness_receipt,
     validate_paper_manifest,
     validate_paper_plan,
 )
 from pi.staged_workflow import (
     ContractError,
     artifact_hashes,
+    canonical_hash,
     expand_problem_phases,
     final_repair_prompt,
     final_stage_prompt,
     frozen_errors,
     initial_workflow,
+    inventory_audit_prompt,
+    inventory_path,
+    inventory_prompt,
+    inventory_revision_prompt,
+    method_audit_prompt,
+    method_proposal_prompt,
+    method_revision_prompt,
+    method_spec_hash,
+    method_version_dir,
+    evidence_downgrade_prompt,
     method_replan_prompt,
     paper_manifest_repair_prompt,
     paper_plan_repair_prompt,
@@ -57,10 +72,20 @@ from pi.staged_workflow import (
     review_prompt,
     scientific_repair_prompt,
     scientific_review_prompt,
+    spike_budget,
+    spike_prompt,
     stage_scope_errors,
     validate_execution_plan,
+    validate_method_card,
+    validate_problem_inventory,
+    validate_spike_report,
     workspace_hashes,
     writing_repair_prompt,
+)
+from pi.windows_host import (
+    CREATE_NO_WINDOW,
+    CREATE_SUSPENDED,
+    WindowsHostBoundary,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +93,7 @@ WORKSPACES = ROOT / "workspaces"
 UPSTREAM_SKILLS = ROOT / "skills"
 PI_SKILLS = ROOT / "pi" / "skills"
 ENTRY_SKILL = PI_SKILLS / "mathmodelagent-pi" / "SKILL.md"
+TOOL_POLICY_EXTENSION = ROOT / "pi" / "tool_policy.ts"
 VENV_SCRIPTS = ROOT / ".venv-pi" / "Scripts"
 TASK_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
@@ -76,8 +102,45 @@ RPC_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 MAX_VERIFY_REPAIRS = 2
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
-SCAFFOLD_DIRS = ("reports", "code", "results", "figures", "paper")
+SCAFFOLD_DIRS = ("reports", "code", "results", "figures", "paper", "planning")
 PROBLEM_SUFFIXES = {".pdf", ".md", ".txt", ".docx"}
+
+
+@lru_cache(maxsize=1)
+def _host_transition_key() -> bytes:
+    """Load a Bridge-only signing key kept outside every Pi workspace."""
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share")
+    path = base / "MathModelAgentPi" / "host-transition.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key = path.read_bytes()
+    except FileNotFoundError:
+        key = os.urandom(32)
+        try:
+            with path.open("xb") as output:
+                output.write(key)
+        except FileExistsError:
+            key = path.read_bytes()
+    if len(key) != 32:
+        raise RuntimeError("MathModelAgent Host transition key is invalid")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return key
+
+
+def _transition_signature(task_id: str, transition: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {key: value for key, value in transition.items() if key != "signature"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(
+        _host_transition_key(), task_id.encode("ascii") + b"\0" + payload, hashlib.sha256
+    ).hexdigest()
+
 
 PHASES = (
     ("analysis", "赛题分析与建模", "reports/ANALYSIS_MODELING_REPORT.md"),
@@ -400,6 +463,43 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
+def _file_record(workspace: Path, path: Path) -> dict[str, str]:
+    return {
+        "path": path.relative_to(workspace).as_posix(),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _artifact_record_valid(workspace: Path, record: Any) -> bool:
+    if not isinstance(record, dict) or not isinstance(record.get("artifact_sha256"), dict):
+        return False
+    hashes = record["artifact_sha256"]
+    report = record.get("report")
+    if not hashes or not isinstance(report, dict):
+        return False
+    report_relative = str(report.get("path") or "")
+    relative = PurePosixPath(report_relative.replace("\\", "/"))
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return False
+    report_path = workspace / relative.as_posix()
+    try:
+        report_value = json.loads(report_path.read_text(encoding="utf-8"))
+        declared = set(report_value.get("artifact_paths") or []) | {relative.as_posix()}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    if set(hashes) != declared or report.get("sha256") != hashes.get(relative.as_posix()):
+        return False
+    return all(
+        (workspace / path).is_file()
+        and hashlib.sha256((workspace / path).read_bytes()).hexdigest() == expected
+        for path, expected in hashes.items()
+        if isinstance(path, str) and isinstance(expected, str)
+    ) and len(hashes) == sum(
+        isinstance(path, str) and isinstance(expected, str)
+        for path, expected in hashes.items()
+    )
+
+
 async def _initialize_project(
     *,
     question: str,
@@ -601,8 +701,15 @@ async def _start_project(
     workflow = initial_workflow(
         {"model": planner_model, "thinking": planner_thinking},
         {"model": worker_model, "thinking": worker_thinking},
-        contract_version=2,
+        contract_version=3,
     )
+    (runtime.workspace / "planning").mkdir(exist_ok=True)
+    _write_json(runtime.workspace / "planning" / "ledger.json", {
+        "schema_version": 1,
+        "inventory": {"version": 1, "status": "candidate"},
+        "problems": {},
+        "plan_version": 0,
+    })
     workflow["phases"][0]["started_at"] = runtime.started_at
     workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
     project.update(
@@ -627,11 +734,11 @@ async def _start_project(
     await runtime.publish(
         _message("user", request.question.strip() or f"使用 {problem_file} 开始完整建模")
     )
-    prompt = planning_prompt(
+    prompt = inventory_prompt(
         problem_file=problem_file,
+        version=1,
         competition=request.competition,
         language=request.language,
-        paper_engine=request.paper_engine,
         notes=request.question.strip(),
     )
     runtime.runner = asyncio.create_task(runtime.run(prompt))
@@ -661,12 +768,15 @@ class TaskRuntime:
     _last_assistant_text: str = ""
     _tool_message_ids: dict[str, str] = field(default_factory=dict)
     _tool_watchdogs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _tool_started_at: dict[str, float] = field(default_factory=dict)
     _pending_rpc: dict[str, list[asyncio.Future[dict[str, Any]]]] = field(
         default_factory=dict
     )
     _transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _budget_exceeded: bool = False
+    _tool_policy_token: str = field(default_factory=lambda: uuid.uuid4().hex)
+    _host_boundary: WindowsHostBoundary | None = None
 
     @property
     def message_file(self) -> Path:
@@ -680,7 +790,7 @@ class TaskRuntime:
         try:
             project = json.loads(project_path.read_text(encoding="utf-8"))
             project["status"] = status
-            _write_json(project_path, project)
+            self._save_project(project)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -776,7 +886,18 @@ class TaskRuntime:
         for watchdog in self._tool_watchdogs.values():
             watchdog.cancel()
         self._tool_watchdogs.clear()
+        self._tool_started_at.clear()
+        if self._host_boundary and self._host_boundary.job_handle is not None:
+            assigned = self._host_boundary.job_assigned
+            self._host_boundary.terminate_job()
+            if self.process and self.process.returncode is None:
+                if not assigned:
+                    self.process.kill()
+                await asyncio.wait_for(self.process.wait(), timeout=10)
+            self._release_host_state()
+            return
         if not self.process or self.process.returncode is not None:
+            self._release_host_state()
             return
         if os.name == "nt":
             killer = await asyncio.create_subprocess_exec(
@@ -786,10 +907,14 @@ class TaskRuntime:
                 "/T",
                 "/F",
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            await killer.wait()
+            _, error = await killer.communicate()
+            if killer.returncode != 0:
+                raise RuntimeError(
+                    f"Pi process-tree termination failed: {error.decode(errors='replace')}"
+                )
         else:
             self.process.terminate()
         try:
@@ -797,6 +922,7 @@ class TaskRuntime:
         except asyncio.TimeoutError:
             self.process.kill()
             await self.process.wait()
+        self._release_host_state()
 
     async def pause(self, reason: str = "user") -> None:
         if self.status not in {"starting", "running"}:
@@ -808,6 +934,18 @@ class TaskRuntime:
         project["pause_count"] = int(project.get("pause_count") or 0) + 1
         workflow = project.get("workflow")
         if isinstance(workflow, dict):
+            if (
+                workflow.get("contract_version") == 3
+                and workflow.get("mode") == "feasibility_spike"
+                and self._tool_started_at
+            ):
+                now = time.monotonic()
+                workflow["spike_elapsed_seconds"] = round(
+                    float(workflow.get("spike_elapsed_seconds") or 0)
+                    + sum(max(0.0, now - started) for started in self._tool_started_at.values()),
+                    3,
+                )
+                self._tool_started_at.clear()
             phase = self._current_phase(workflow)
             if phase:
                 phase["status_before_pause"] = phase.get("status") or "running"
@@ -835,9 +973,15 @@ class TaskRuntime:
         workflow = project["workflow"]
         stage = str(workflow.get("current") or "")
         mode = str(workflow.get("mode") or "run")
-        if stage in {"planning", "plan_audit", "paper_planning", "verify"}:
+        if stage in {"planning", "plan_audit", "paper_planning", "verify", "inventory", "inventory_audit"}:
             return "planner"
-        if mode in {"plan_audit", "plan_revision", "scientific_review", "method_replan"}:
+        if stage.startswith("method:") or stage.startswith("method_audit:"):
+            return "planner"
+        if mode in {
+            "plan_audit", "plan_revision", "scientific_review", "method_replan",
+            "inventory", "inventory_audit", "inventory_revision", "method_proposal",
+            "method_audit", "method_revision", "evidence_downgrade",
+        }:
             return "planner"
         return "worker"
 
@@ -848,6 +992,62 @@ class TaskRuntime:
         phase = self._current_phase(workflow) or {}
         errors = [str(phase.get("last_error") or "Interrupted by a user pause; recheck current artifacts before continuing.")]
         problem = self._problem(workflow)
+        if mode == "inventory":
+            return inventory_prompt(
+                problem_file=str(project["problem_file"]),
+                version=int(workflow.get("inventory_version") or 1),
+                competition=str(project.get("competition") or "CUMCM"),
+                language=str(project.get("language") or "Chinese"),
+                notes="",
+            )
+        if mode == "inventory_audit":
+            return inventory_audit_prompt(self._inventory(workflow))
+        if mode == "inventory_revision":
+            return inventory_revision_prompt(
+                workflow.get("last_review") or {},
+                int(workflow.get("inventory_version") or 1),
+            )
+        if mode in {"method_proposal", "method_revision", "evidence_downgrade"}:
+            problem_id = self._phase_problem_id(workflow)
+            if problem_id:
+                inventory = self._inventory(workflow)
+                version = self._proposal_version(workflow)
+                if mode == "method_proposal":
+                    return method_proposal_prompt(
+                        inventory, problem_id, version, canonical_hash(inventory)
+                    )
+                if mode == "evidence_downgrade":
+                    return evidence_downgrade_prompt(
+                        inventory, problem_id, version, workflow.get("last_review") or {}
+                    )
+                return method_revision_prompt(
+                    inventory, problem_id, version, workflow.get("last_review") or {}
+                )
+        if mode == "feasibility_spike":
+            card = self._method_card(workflow)
+            if card:
+                return spike_prompt(
+                    card,
+                    supplemental=bool(workflow.get("supplemental_spike")),
+                    supplemental_ids=list(workflow.get("supplemental_spike_ids") or []),
+                )
+        if mode == "method_audit":
+            card = self._method_card(workflow)
+            if card:
+                primary_spike = self._spike_report(workflow, card, supplemental=False)
+                spike: dict[str, Any] = primary_spike
+                if workflow.get("supplemental_spike"):
+                    spike = {
+                        "primary": primary_spike,
+                        "supplemental": self._spike_report(
+                            workflow, card, supplemental=True
+                        ),
+                    }
+                inventory_problem = next(
+                    item for item in self._inventory(workflow)["problems"]
+                    if item["id"] == card["problem_id"]
+                )
+                return method_audit_prompt(inventory_problem, card, spike)
         if mode == "plan_audit":
             return plan_audit_prompt()
         if mode == "plan_revision":
@@ -937,11 +1137,19 @@ class TaskRuntime:
             str(PI_SKILLS),
             "--append-system-prompt",
             str(ENTRY_SKILL),
+            "--extension",
+            str(TOOL_POLICY_EXTENSION),
             "--session-dir",
             str(session_dir),
             "--name",
             f"MathModelAgent {self.task_id}",
         ]
+        try:
+            workflow = self._project().get("workflow") or {}
+            if self._reviewer_capability(workflow):
+                command.append("--mathmodel-review")
+        except (OSError, json.JSONDecodeError):
+            pass
         model = self.requested_model or os.environ.get("MATHMODEL_PI_MODEL", "").strip()
         if model:
             command.extend(("--model", model))
@@ -959,11 +1167,18 @@ class TaskRuntime:
                 "PATH": f"{VENV_SCRIPTS}{os.pathsep}{environment.get('PATH', '')}",
                 "MPLBACKEND": "Agg",
                 "PYTHONUTF8": "1",
+                "MATHMODEL_TOOL_POLICY_TOKEN": self._tool_policy_token,
             }
         )
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        contract_v3 = (self._project().get("workflow") or {}).get("contract_version") == 3
+        creationflags = (
+            CREATE_NO_WINDOW | (CREATE_SUSPENDED if contract_v3 else 0)
+            if os.name == "nt"
+            else 0
+        )
 
         try:
+            self._acquire_host_state()
             self.process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=self.workspace,
@@ -978,6 +1193,8 @@ class TaskRuntime:
             project["runtime_owner_pid"] = os.getpid()
             project["pi_pid"] = self.process.pid
             self._save_project(project)
+            if self._host_boundary:
+                self._host_boundary.assign_and_resume(self.process.pid)
             self.set_status("running")
             await self.system("Pi 已启动，正在执行 MathModelAgent 全流程")
             stderr_task = asyncio.create_task(self._read_stderr())
@@ -991,7 +1208,7 @@ class TaskRuntime:
             try:
                 project = self._project()
                 workflow = project.get("workflow")
-                if isinstance(workflow, dict) and workflow.get("contract_version") == 2:
+                if isinstance(workflow, dict) and workflow.get("contract_version") in {2, 3}:
                     project["status"] = "paused"
                     project["paused_at"] = _now()
                     project["pause_reason"] = f"bridge_error: {exc}"
@@ -1134,6 +1351,7 @@ class TaskRuntime:
             if str(event.get("toolName") or "") == "bash":
                 seconds = self._current_runtime_limit()
                 if seconds:
+                    self._tool_started_at[tool_call_id] = time.monotonic()
                     self._tool_watchdogs[tool_call_id] = asyncio.create_task(
                         self._watch_tool(tool_call_id, seconds)
                     )
@@ -1146,6 +1364,23 @@ class TaskRuntime:
                 watchdog = self._tool_watchdogs.pop(tool_call_id, None)
                 if watchdog:
                     watchdog.cancel()
+                started = self._tool_started_at.pop(tool_call_id, None)
+                if started is not None:
+                    try:
+                        project = self._project()
+                        workflow = project.get("workflow") or {}
+                        if (
+                            workflow.get("contract_version") == 3
+                            and workflow.get("mode") == "feasibility_spike"
+                        ):
+                            workflow["spike_elapsed_seconds"] = round(
+                                float(workflow.get("spike_elapsed_seconds") or 0)
+                                + max(0.0, time.monotonic() - started),
+                                3,
+                            )
+                            self._save_project(project)
+                    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                        pass
             if not message_id:
                 return
             result = (
@@ -1186,7 +1421,108 @@ class TaskRuntime:
         return json.loads((self.workspace / "project.json").read_text(encoding="utf-8"))
 
     def _save_project(self, project: dict[str, Any]) -> None:
-        _write_json(self.workspace / "project.json", project)
+        if self._host_boundary:
+            self._host_boundary.save_project(project)
+        else:
+            _write_json(self.workspace / "project.json", project)
+
+    def _acquire_host_state(self) -> None:
+        if self._host_boundary:
+            return
+        workflow = self._project().get("workflow") or {}
+        if workflow.get("contract_version") != 3:
+            return
+        boundary = WindowsHostBoundary(self.task_id, self.workspace)
+        boundary.acquire()
+        self._host_boundary = boundary
+
+    def _release_host_state(self) -> None:
+        if self._host_boundary:
+            self._host_boundary.release()
+            self._host_boundary = None
+
+    def _ledger(self) -> dict[str, Any]:
+        path = self.workspace / "planning" / "ledger.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ContractError(f"Host planning ledger is missing or invalid: {exc}") from exc
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            raise ContractError("Host planning ledger schema is invalid")
+        return value
+
+    def _save_ledger(self, ledger: dict[str, Any]) -> None:
+        if self._host_boundary:
+            self._host_boundary.save_ledger(ledger)
+        else:
+            _write_json(self.workspace / "planning" / "ledger.json", ledger)
+
+    def _inventory(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        ledger = self._ledger()
+        version = int((ledger.get("inventory") or {}).get("version") or workflow.get("inventory_version") or 1)
+        return validate_problem_inventory(self.workspace, version)
+
+    def _phase_problem_id(self, workflow: dict[str, Any]) -> str | None:
+        current = str(workflow.get("current") or "")
+        if ":" not in current:
+            return None
+        kind, problem_id = current.split(":", 1)
+        return problem_id if kind in {"method", "spike", "method_audit", "problem"} else None
+
+    def _proposal_version(self, workflow: dict[str, Any]) -> int:
+        if workflow.get("contract_version") != 3:
+            return 1
+        problem_id = self._phase_problem_id(workflow)
+        if not problem_id:
+            return int(workflow.get("inventory_version") or 1)
+        try:
+            entry = (self._ledger().get("problems") or {}).get(problem_id) or {}
+            return int(entry.get("proposal_version") or workflow.get("proposal_version") or 1)
+        except (ContractError, TypeError, ValueError):
+            return int(workflow.get("proposal_version") or 1)
+
+    def _method_card(self, workflow: dict[str, Any]) -> dict[str, Any] | None:
+        problem_id = self._phase_problem_id(workflow)
+        if not problem_id:
+            return None
+        try:
+            return validate_method_card(
+                self.workspace,
+                self._inventory(workflow),
+                problem_id,
+                self._proposal_version(workflow),
+            )
+        except ContractError:
+            return None
+
+    def _spike_report(
+        self,
+        workflow: dict[str, Any],
+        card: dict[str, Any],
+        *,
+        supplemental: bool | None = None,
+    ) -> dict[str, Any]:
+        entry = (self._ledger().get("problems") or {}).get(card["problem_id"]) or {}
+        source_version = (
+            card["proposal_version"]
+            if supplemental
+            else int(entry.get("spike_source_version") or card["proposal_version"])
+        )
+        return validate_spike_report(
+            self.workspace,
+            card,
+            supplemental=(
+                bool(workflow.get("supplemental_spike"))
+                if supplemental is None
+                else supplemental
+            ),
+            source_version=source_version,
+            supplemental_ids=(
+                set(workflow.get("supplemental_spike_ids") or [])
+                if (bool(workflow.get("supplemental_spike")) if supplemental is None else supplemental)
+                else None
+            ),
+        )
 
     def _current_phase(self, workflow: dict[str, Any]) -> dict[str, Any] | None:
         return next(
@@ -1208,10 +1544,36 @@ class TaskRuntime:
     def _current_runtime_limit(self) -> int | None:
         try:
             workflow = self._project().get("workflow") or {}
+            if workflow.get("contract_version") == 3 and str(workflow.get("current") or "").startswith("spike:"):
+                card = self._method_card(workflow)
+                if card:
+                    budget = 60 if workflow.get("supplemental_spike") else spike_budget(
+                        card["problem"]["runtime_limit_seconds"]
+                    )
+                    remaining = budget - int(float(workflow.get("spike_elapsed_seconds") or 0))
+                    if remaining <= 0:
+                        self._budget_exceeded = True
+                    return max(1, remaining)
             problem = self._problem(workflow)
             return int(problem["runtime_limit_seconds"]) if problem else None
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
+
+    def _reviewer_capability(self, workflow: dict[str, Any]) -> bool:
+        return str(workflow.get("mode") or "") in {
+            "review",
+            "plan_audit",
+            "scientific_review",
+            "inventory_audit",
+            "method_audit",
+        }
+
+    async def _set_tool_policy(self, *, review: bool) -> None:
+        mode = "review" if review else "work"
+        await self.rpc_command({
+            "type": "prompt",
+            "message": f"/mathmodel-tool-policy {self._tool_policy_token} {mode}",
+        })
 
     async def _switch_session(self, profile: str) -> None:
         project = self._project()
@@ -1228,10 +1590,18 @@ class TaskRuntime:
         thinking = str(config.get("thinking") or "high")
         await self.rpc_command({"type": "set_thinking_level", "level": thinking})
         self.thinking_level = thinking
+        await self._set_tool_policy(review=self._reviewer_capability(workflow))
 
     def _prompt_for_current(self, project: dict[str, Any]) -> str:
         workflow = project["workflow"]
         stage = str(workflow["current"])
+        mode = str(workflow.get("mode") or "run")
+        if workflow.get("contract_version") == 3:
+            if mode in {
+                "inventory", "inventory_audit", "inventory_revision", "method_proposal",
+                "feasibility_spike", "method_audit", "method_revision", "evidence_downgrade",
+            }:
+                return self._resume_prompt(project)
         if stage == "planning":
             return planning_prompt(
                 problem_file=str(project["problem_file"]),
@@ -1255,20 +1625,48 @@ class TaskRuntime:
             paper_engine=str(project.get("paper_engine") or "LaTeX"),
         )
 
+    def _v3_mode_for_stage(self, stage: str) -> str:
+        if stage == "inventory":
+            return "inventory"
+        if stage == "inventory_audit":
+            return "inventory_audit"
+        if stage.startswith("method:"):
+            return "method_proposal"
+        if stage.startswith("spike:"):
+            return "feasibility_spike"
+        if stage.startswith("method_audit:"):
+            return "method_audit"
+        return "execute" if stage.startswith("problem:") else "run"
+
     async def _begin_current(self, *, new_session: bool = True) -> None:
         project = self._project()
         workflow = project["workflow"]
         stage = str(workflow["current"])
-        profile = (
-            "planner"
-            if stage in {"planning", "plan_audit", "paper_planning", "verify"}
-            else "worker"
-        )
+        profile = self._profile_for_resume(project)
         if new_session:
             await self._switch_session(profile)
         project = self._project()
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
+        if workflow.get("contract_version") == 3 and stage.startswith("method:"):
+            problem_id = stage.split(":", 1)[1]
+            ledger = self._ledger()
+            ledger.setdefault("problems", {}).setdefault(problem_id, {
+                "proposal_version": 1,
+                "status": "candidate",
+                "ordinary_audits": 0,
+                "supplemental_used": False,
+                "superseded_versions": [],
+            })
+            self._save_ledger(ledger)
+            workflow["proposal_version"] = int(
+                ledger["problems"][problem_id]["proposal_version"]
+            )
+            workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+        if workflow.get("contract_version") == 3 and (
+            stage == "inventory_audit" or stage.startswith("method_audit:")
+        ):
+            workflow["review_snapshot"] = workspace_hashes(self.workspace)
         if phase:
             phase["status"] = "running"
             phase["attempts"] = max(1, int(phase.get("attempts") or 0))
@@ -1288,13 +1686,45 @@ class TaskRuntime:
                 self.workspace,
                 workflow.get("stage_snapshot") or {},
                 stage,
+                planning_version=self._proposal_version(workflow),
+                supplemental_spike=bool(workflow.get("supplemental_spike")),
             )
         )
         if self._budget_exceeded:
             errors.append("performance_budget: command exceeded runtime_limit_seconds")
             self._budget_exceeded = False
         plan = None
-        if stage == "planning":
+        if stage == "inventory":
+            version = int(workflow.get("inventory_version") or 1)
+            report = self.workspace / "reports" / f"PROBLEM_INVENTORY_v{version}.md"
+            if not report.is_file() or not report.stat().st_size:
+                errors.append(f"artifact_missing: reports/PROBLEM_INVENTORY_v{version}.md")
+            try:
+                plan = validate_problem_inventory(self.workspace, version)
+            except ContractError as exc:
+                errors.append(f"validation_failed: {exc}")
+        elif stage.startswith("method:"):
+            problem_id = stage.split(":", 1)[1]
+            version = self._proposal_version(workflow)
+            report = self.workspace / "reports" / f"{problem_id}_METHOD_v{version}.md"
+            if not report.is_file() or not report.stat().st_size:
+                errors.append(f"artifact_missing: reports/{problem_id}_METHOD_v{version}.md")
+            try:
+                plan = validate_method_card(
+                    self.workspace, self._inventory(workflow), problem_id, version
+                )
+            except ContractError as exc:
+                errors.append(f"validation_failed: {exc}")
+        elif stage.startswith("spike:"):
+            card = self._method_card(workflow)
+            if not card:
+                errors.append("validation_failed: current method card is invalid")
+            else:
+                try:
+                    plan = self._spike_report(workflow, card)
+                except ContractError as exc:
+                    errors.append(f"validation_failed: {exc}")
+        elif stage == "planning":
             report = self.workspace / "reports" / "ANALYSIS_MODELING_REPORT.md"
             if not report.is_file() or not report.stat().st_size:
                 errors.append("artifact_missing: reports/ANALYSIS_MODELING_REPORT.md")
@@ -1326,7 +1756,7 @@ class TaskRuntime:
         elif stage == "writing":
             if not _paper_readable(self.workspace):
                 errors.append("validation_failed: paper PDF is missing, empty, or unreadable")
-            if workflow.get("contract_version") == 2:
+            if workflow.get("contract_version") in {2, 3}:
                 try:
                     active_plan = validate_execution_plan(self.workspace)
                     paper_plan = validate_paper_plan(self.workspace, active_plan)
@@ -1342,11 +1772,17 @@ class TaskRuntime:
         elif stage == "verify":
             report = self.workspace / "reports" / "VERIFY_REPORT.md"
             text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
-            if workflow.get("contract_version") == 2:
+            if workflow.get("contract_version") in {2, 3}:
                 try:
                     active_plan = validate_execution_plan(self.workspace)
-                    errors.extend(acceptance_chain_errors(self.workspace, active_plan))
-                except ContractError as exc:
+                    ledger = self._ledger() if workflow.get("contract_version") == 3 else None
+                    errors.extend(acceptance_chain_errors(
+                        self.workspace,
+                        active_plan,
+                        contract_version=int(workflow.get("contract_version") or 2),
+                        ledger=ledger,
+                    ))
+                except (ContractError, OSError, json.JSONDecodeError) as exc:
                     errors.append(f"scientific_acceptance: {exc}")
             if not _verification_passed(text):
                 errors.append("validation_failed: reports/VERIFY_REPORT.md does not have an explicit PASS conclusion")
@@ -1359,7 +1795,7 @@ class TaskRuntime:
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
         detail = "; ".join(errors)[:2000]
-        if workflow.get("contract_version") == 2:
+        if workflow.get("contract_version") in {2, 3}:
             if phase:
                 phase["status"] = "failed"
                 phase["last_error"] = detail
@@ -1478,7 +1914,7 @@ class TaskRuntime:
         if stage == "verify":
             await self._start_writing_repair(errors)
             return
-        if workflow.get("contract_version") == 2 and stage == "writing":
+        if workflow.get("contract_version") in {2, 3} and stage == "writing":
             if attempts >= 3:
                 await self._wait_with_errors(errors)
                 return
@@ -1531,7 +1967,30 @@ class TaskRuntime:
         phases = workflow["phases"]
         current_index = next(index for index, item in enumerate(phases) if item["id"] == stage)
         next_phase = phases[current_index + 1] if current_index + 1 < len(phases) else None
-        workflow["mode"] = "run"
+        if (
+            workflow.get("contract_version") == 3
+            and stage.startswith("problem:")
+            and next_phase
+            and next_phase["id"] == "paper_planning"
+        ):
+            active_plan = validate_execution_plan(self.workspace)
+            receipt, completeness_errors = plan_completeness_receipt(
+                self.workspace, active_plan, self._ledger()
+            )
+            if completeness_errors:
+                await self._wait_with_errors(completeness_errors)
+                return
+            _write_json(self.workspace / "reports" / "PLAN_COMPLETENESS.json", receipt)
+        workflow["mode"] = (
+            self._v3_mode_for_stage(next_phase["id"])
+            if workflow.get("contract_version") == 3 and next_phase
+            else "run"
+        )
+        if workflow.get("contract_version") == 3:
+            if next_phase and next_phase["id"].startswith("spike:"):
+                workflow["spike_elapsed_seconds"] = 0.0
+            elif stage.startswith("spike:"):
+                workflow.pop("spike_elapsed_seconds", None)
         workflow["stage_snapshot"] = workspace_hashes(self.workspace)
         if not next_phase:
             project["status"] = "completed"
@@ -1736,35 +2195,70 @@ class TaskRuntime:
         if not problem or not phase:
             await self._wait_with_errors(["scientific_review: current problem missing"])
             return
-        if workspace_hashes(self.workspace) != (workflow.get("review_snapshot") or {}):
-            await self._wait_with_errors(["artifact_changed: scientific reviewer modified workspace"])
-            return
+        review_path = self.workspace / "reports" / f"{problem['id']}_SCIENTIFIC_REVIEW.json"
         try:
-            review = parse_review(
-                self._last_assistant_text,
-                review_type="scientific",
-                problem_id=problem["id"],
+            pending = (
+                self._pending_transition(workflow, "scientific_review")
+                if workflow.get("contract_version") == 3
+                else None
             )
-        except ScientificContractError as exc:
-            if int(phase.get("review_attempts") or 0) < 3:
-                await self._start_scientific_review(project, problem)
-            else:
-                await self._wait_with_errors([f"review_protocol: {exc}"])
+        except ContractError as exc:
+            await self._wait_with_errors([f"scientific_review: {exc}"])
             return
-        _write_json(
-            self.workspace / "reports" / f"{problem['id']}_SCIENTIFIC_REVIEW.json",
-            review,
-        )
+        if pending:
+            review = pending["review"]
+        else:
+            if workspace_hashes(self.workspace) != (workflow.get("review_snapshot") or {}):
+                await self._wait_with_errors(["artifact_changed: scientific reviewer modified workspace"])
+                return
+            try:
+                review = parse_review(
+                    self._last_assistant_text,
+                    review_type="scientific",
+                    problem_id=problem["id"],
+                )
+            except ScientificContractError as exc:
+                if int(phase.get("review_attempts") or 0) < 3:
+                    await self._start_scientific_review(project, problem)
+                else:
+                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                return
+            if workflow.get("contract_version") == 3:
+                self._authorize_transition(project, "scientific_review", review)
+        _write_json(review_path, review)
         workflow["last_review"] = review
         phase["review_status"] = review["verdict"]
-        workflow.pop("review_snapshot", None)
-        self._save_project(project)
         if review["verdict"] == "accept":
             phase["scientific_status"] = "accepted"
+            if workflow.get("contract_version") == 3:
+                ledger = self._ledger()
+                entry = (ledger.get("problems") or {}).get(problem["id"])
+                candidate_hashes = artifact_hashes(self.workspace, problem["id"])
+                if not isinstance(entry, dict):
+                    await self._wait_with_errors([
+                        f"scientific_acceptance: {problem['id']} method ledger is missing"
+                    ])
+                    return
+                if entry.get("status") == "provisional":
+                    entry["status"] = "accepted"
+                    entry["scientific_candidate_sha256"] = candidate_hashes
+                    self._save_ledger(ledger)
+                elif not (
+                    entry.get("status") == "accepted"
+                    and entry.get("plan_problem_sha256") == canonical_hash(problem)
+                    and entry.get("scientific_candidate_sha256") == candidate_hashes
+                    and not result_errors(self.workspace, problem)
+                ):
+                    await self._wait_with_errors([
+                        f"scientific_acceptance: {problem['id']} interrupted acceptance state is inconsistent"
+                    ])
+                    return
+            workflow.pop("review_snapshot", None)
+            workflow.pop("pending_transition", None)
             workflow["mode"] = "run"
-            self._save_project(project)
             await self._complete_current(project, None)
             return
+        workflow.pop("review_snapshot", None)
         issue_class = review["issue_class"]
         if issue_class in {"implementation", "evidence"}:
             if int(phase.get("attempts") or 1) >= 3:
@@ -1776,6 +2270,7 @@ class TaskRuntime:
             phase["review_status"] = "repairing"
             workflow["mode"] = "scientific_repair"
             workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+            workflow.pop("pending_transition", None)
             self._save_project(project)
             try:
                 await self._switch_session("worker")
@@ -1786,7 +2281,10 @@ class TaskRuntime:
             except Exception as exc:
                 await self._wait_with_errors([f"rpc_error: scientific repair failed: {exc}"])
             return
-        await self._start_method_replan(project, problem, review)
+        if workflow.get("contract_version") == 3:
+            await self._start_v3_method_revision_from_science(project, review)
+        else:
+            await self._start_method_replan(project, problem, review)
 
     async def _repair_candidate_v2(self, errors: list[str]) -> None:
         project = self._project()
@@ -1801,6 +2299,639 @@ class TaskRuntime:
         self._save_project(project)
         await self.system("Candidate 确定性门禁未通过，Luna 正在修复", "warning")
         await self.prompt(repair_prompt(workflow["current"], errors))
+
+    def _pending_transition(
+        self, workflow: dict[str, Any], kind: str
+    ) -> dict[str, Any] | None:
+        pending = workflow.get("pending_transition")
+        if pending is None:
+            return None
+        valid = (
+            isinstance(pending, dict)
+            and pending.get("kind") == kind
+            and pending.get("stage") == workflow.get("current")
+            and isinstance(pending.get("review"), dict)
+            and isinstance(pending.get("ledger_before"), dict)
+            and isinstance(pending.get("signature"), str)
+            and hmac.compare_digest(
+                pending["signature"], _transition_signature(self.task_id, pending)
+            )
+        )
+        if not valid:
+            raise ContractError("Host pending transition is invalid or forged")
+        self._save_ledger(pending["ledger_before"])
+        return pending
+
+    def _authorize_transition(
+        self,
+        project: dict[str, Any],
+        kind: str,
+        review: dict[str, Any],
+    ) -> None:
+        workflow = project["workflow"]
+        transition = {
+            "kind": kind,
+            "stage": workflow.get("current"),
+            "review": review,
+            "ledger_before": self._ledger(),
+        }
+        transition["signature"] = _transition_signature(self.task_id, transition)
+        workflow["pending_transition"] = transition
+        self._save_project(project)
+
+    def _analysis_report_from_ledger(
+        self, inventory: dict[str, Any], ledger: dict[str, Any]
+    ) -> None:
+        inventory_version = int((ledger.get("inventory") or {}).get("version") or 1)
+        sources = [
+            self.workspace / "reports" / f"PROBLEM_INVENTORY_v{inventory_version}.md"
+        ]
+        entries = ledger.get("problems") or {}
+        for problem in inventory["problems"]:
+            entry = entries.get(problem["id"])
+            if isinstance(entry, dict) and entry.get("status") in {"provisional", "accepted"}:
+                version = int(entry["proposal_version"])
+                sources.append(
+                    self.workspace / "reports" / f"{problem['id']}_METHOD_v{version}.md"
+                )
+        text = "# Analysis and Modeling Report\n\n" + "\n\n".join(
+            source.read_text(encoding="utf-8").strip()
+            for source in sources
+            if source.is_file()
+        )
+        (self.workspace / "reports" / "ANALYSIS_MODELING_REPORT.md").write_text(
+            text.rstrip() + "\n", encoding="utf-8"
+        )
+
+    def _activate_method(
+        self,
+        workflow: dict[str, Any],
+        card: dict[str, Any],
+        audit_path: Path,
+    ) -> None:
+        ledger = self._ledger()
+        problem_id = card["problem_id"]
+        entry = (ledger.get("problems") or {}).get(problem_id)
+        if not isinstance(entry, dict):
+            raise ContractError(f"{problem_id} method ledger entry missing")
+        entry["status"] = "provisional"
+        entry["plan_problem_sha256"] = canonical_hash(card["problem"])
+        entry["method_audit"] = _file_record(self.workspace, audit_path)
+        plan_path = self.workspace / "execution_plan.json"
+        if plan_path.is_file():
+            raw_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            problems = list(raw_plan.get("problems") or [])
+            ids = [item.get("id") for item in problems if isinstance(item, dict)]
+            if problem_id in ids:
+                if ids[-1] != problem_id:
+                    raise ContractError("only the current last plan entry may be superseded")
+                same_active_entry = canonical_hash(problems[-1]) == canonical_hash(card["problem"])
+                problems[-1] = card["problem"]
+            else:
+                same_active_entry = False
+                problems.append(card["problem"])
+            plan_version = int(raw_plan.get("plan_version") or 0) + (0 if same_active_entry else 1)
+        else:
+            problems = [card["problem"]]
+            plan_version = 1
+        candidate = {
+            "schema_version": 2,
+            "plan_version": plan_version,
+            "problems": problems,
+        }
+        previous = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else None
+        _write_json(plan_path, candidate)
+        try:
+            normalized = validate_execution_plan(self.workspace)
+        except Exception:
+            if previous is None:
+                plan_path.unlink(missing_ok=True)
+            else:
+                plan_path.write_text(previous, encoding="utf-8")
+            raise
+        _write_json(plan_path, normalized)
+        workflow["plan_version"] = normalized["plan_version"]
+        ledger["plan_version"] = normalized["plan_version"]
+        self._save_ledger(ledger)
+        self._analysis_report_from_ledger(self._inventory(workflow), ledger)
+
+    async def _restart_v3_problem_planning(
+        self,
+        project: dict[str, Any],
+        review: dict[str, Any],
+        *,
+        downgrade_only: bool = False,
+    ) -> None:
+        workflow = project["workflow"]
+        problem_id = self._phase_problem_id(workflow)
+        if not problem_id:
+            await self._wait_with_errors(["method_revision: current problem missing"])
+            return
+        ledger = self._ledger()
+        problems = ledger.setdefault("problems", {})
+        base_card = self._method_card(workflow)
+        previous = problems.get(problem_id) or {}
+        old_version = int(previous.get("proposal_version") or 0)
+        if old_version:
+            previous.setdefault("superseded_versions", []).append(old_version)
+        previous["status"] = "superseded"
+        new_version = old_version + 1
+        workflow["proposal_version"] = new_version
+        previous["proposal_version"] = new_version
+        previous["previous_method_spec_sha256"] = previous.get("method_spec_sha256", "")
+        previous.pop("method_card", None)
+        previous.pop("method_audit", None)
+        previous.pop("supplemental_spike", None)
+        previous["supplemental_used"] = False
+        self._save_ledger(ledger)
+        workflow["last_review"] = review
+        workflow["supplemental_spike"] = False
+        workflow.pop("supplemental_spike_ids", None)
+        workflow.pop("spike_elapsed_seconds", None)
+        workflow["mode"] = "evidence_downgrade" if downgrade_only else "method_revision"
+        workflow["current"] = f"method:{problem_id}"
+        for kind in ("method", "spike", "method_audit"):
+            phase = next(
+                item for item in workflow["phases"] if item["id"] == f"{kind}:{problem_id}"
+            )
+            phase["status"] = "running" if kind == "method" else "pending"
+            phase["last_error"] = "; ".join(review.get("issues") or [])[:2000]
+            if kind == "method":
+                phase["attempts"] = int(phase.get("attempts") or 0) + 1
+                phase["started_at"] = _now()
+        workflow["revision_base_evidence_levels"] = {
+            claim["id"]: claim.get("evidence_level")
+            for claim in (base_card or {}).get("problem", {}).get("claims", [])
+        }
+        if downgrade_only:
+            workflow["downgrade_base_spec"] = previous.get("previous_method_spec_sha256", "")
+            workflow["downgrade_base_problem"] = (base_card or {}).get("problem")
+            workflow["downgrade_claim_ids"] = [
+                item["claim_id"] for item in review.get("allowed_downgrades") or []
+            ]
+        workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+        workflow.pop("pending_transition", None)
+        project["status"] = "running"
+        self._save_project(project)
+        try:
+            await self._switch_session("planner")
+            await self.system(
+                f"Sol 正在{'校准证据等级' if downgrade_only else '定向修订方法'} {problem_id}",
+                "warning",
+            )
+            await self.prompt(self._prompt_for_current(self._project()))
+        except Exception as exc:
+            await self._wait_with_errors([f"rpc_error: method revision failed: {exc}"])
+
+    async def _finish_inventory_audit_v3(self, project: dict[str, Any]) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        try:
+            pending = self._pending_transition(workflow, "inventory_audit")
+        except ContractError as exc:
+            await self._wait_with_errors([f"inventory_audit: {exc}"])
+            return
+        if pending:
+            review = pending["review"]
+        else:
+            if workspace_hashes(self.workspace) != (workflow.get("review_snapshot") or {}):
+                await self._wait_with_errors(["artifact_changed: inventory reviewer modified workspace"])
+                return
+            try:
+                review = parse_review(
+                    self._last_assistant_text, review_type="inventory", problem_id=None
+                )
+            except ScientificContractError as exc:
+                protocol_attempts = int((phase or {}).get("protocol_attempts") or 0) + 1
+                if phase:
+                    phase["protocol_attempts"] = protocol_attempts
+                if protocol_attempts < 2:
+                    self._save_project(project)
+                    await self._switch_session("planner")
+                    await self.prompt(inventory_audit_prompt(self._inventory(workflow)))
+                else:
+                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                return
+            self._authorize_transition(project, "inventory_audit", review)
+        version = int(workflow.get("inventory_version") or 1)
+        if phase:
+            phase["protocol_attempts"] = 0
+        audit_path = inventory_path(self.workspace, version).with_name("audit.json")
+        _write_json(audit_path, review)
+        workflow["last_review"] = review
+        if review["verdict"] == "accept":
+            inventory = validate_problem_inventory(self.workspace, version)
+            ledger = self._ledger()
+            ledger["inventory"] = {
+                "version": version,
+                "status": "accepted",
+                **_file_record(self.workspace, inventory_path(self.workspace, version)),
+                "audit": _file_record(self.workspace, audit_path),
+            }
+            self._save_ledger(ledger)
+            expand_problem_phases(workflow, inventory)
+            workflow.pop("review_snapshot", None)
+            workflow.pop("pending_transition", None)
+            await self._complete_current(project, None)
+            return
+        inventory_phase = next(item for item in workflow["phases"] if item["id"] == "inventory")
+        if review["verdict"] != "blocked" and int(inventory_phase.get("attempts") or 1) < 2:
+            new_version = version + 1
+            workflow["inventory_version"] = new_version
+            workflow["current"] = "inventory"
+            workflow["mode"] = "inventory_revision"
+            inventory_phase.update({
+                "status": "running",
+                "attempts": 2,
+                "started_at": _now(),
+                "last_error": "; ".join(review["issues"])[:2000],
+            })
+            ledger = self._ledger()
+            ledger["inventory"] = {"version": new_version, "status": "candidate"}
+            self._save_ledger(ledger)
+            workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+            workflow.pop("pending_transition", None)
+            self._save_project(project)
+            await self._switch_session("planner")
+            await self.prompt(inventory_revision_prompt(review, new_version))
+            return
+        await self._wait_with_errors([f"inventory_rejected: {issue}" for issue in review["issues"]])
+
+    async def _finish_method_artifact_v3(
+        self, project: dict[str, Any], card: dict[str, Any]
+    ) -> None:
+        workflow = project["workflow"]
+        problem_id = card["problem_id"]
+        version = card["proposal_version"]
+        ledger = self._ledger()
+        problems = ledger.setdefault("problems", {})
+        previous = problems.get(problem_id) or {}
+        previous_spec = str(previous.get("previous_method_spec_sha256") or previous.get("method_spec_sha256") or "")
+        if workflow.get("mode") == "method_revision":
+            base_levels = workflow.get("revision_base_evidence_levels") or {}
+            current_levels = {
+                claim["id"]: claim.get("evidence_level")
+                for claim in card["problem"].get("claims", [])
+            }
+            early_downgrades = sorted(
+                claim_id
+                for claim_id, old_level in base_levels.items()
+                if old_level == "A_certified"
+                and current_levels.get(claim_id) == "B_bounded_numerical"
+            )
+            if early_downgrades:
+                await self._wait_with_errors([
+                    f"evidence_downgrade: A to B requires exhausted audit authorization: {early_downgrades}"
+                ])
+                return
+        if workflow.get("mode") == "evidence_downgrade":
+            allowed = set(workflow.get("downgrade_claim_ids") or [])
+            base_problem = workflow.get("downgrade_base_problem")
+            if not isinstance(base_problem, dict) or {
+                key: value for key, value in base_problem.items() if key != "claims"
+            } != {
+                key: value for key, value in card["problem"].items() if key != "claims"
+            }:
+                await self._wait_with_errors(["evidence_downgrade: non-claim contract fields changed"])
+                return
+            base_claims = {claim["id"]: claim for claim in base_problem.get("claims", [])}
+            current_claims = {claim["id"]: claim for claim in card["problem"].get("claims", [])}
+            if set(base_claims) != set(current_claims) or not allowed <= set(base_claims):
+                await self._wait_with_errors(["evidence_downgrade: claim identity changed"])
+                return
+            for claim_id, base_claim in base_claims.items():
+                current_claim = current_claims[claim_id]
+                if claim_id not in allowed and current_claim != base_claim:
+                    await self._wait_with_errors([
+                        f"evidence_downgrade: unauthorized claim changed: {claim_id}"
+                    ])
+                    return
+                if claim_id in allowed and not (
+                    base_claim.get("evidence_level") == "A_certified"
+                    and current_claim.get("evidence_level") == "B_bounded_numerical"
+                    and current_claim.get("type") == base_claim.get("type")
+                    and current_claim.get("requested_output_ids") == base_claim.get("requested_output_ids")
+                ):
+                    await self._wait_with_errors([
+                        f"evidence_downgrade: invalid A to B change: {claim_id}"
+                    ])
+                    return
+        card_path = method_version_dir(self.workspace, problem_id, version) / "method_card.json"
+        report_path = self.workspace / "reports" / f"{problem_id}_METHOD_v{version}.md"
+        entry = {
+            "proposal_version": version,
+            "status": "candidate",
+            "method_spec_sha256": card["method_spec_sha256"],
+            "method_card": _file_record(self.workspace, card_path),
+            "method_report": _file_record(self.workspace, report_path),
+            "ordinary_audits": int(previous.get("ordinary_audits") or 0),
+            "supplemental_used": bool(previous.get("supplemental_used")),
+            "supplemental_ever_used": bool(previous.get("supplemental_ever_used")),
+            "superseded_versions": previous.get("superseded_versions", []),
+        }
+        reusable_source = previous.get("spike_source_version")
+        reusable_record = previous.get("spike")
+        reusable = bool(
+            previous_spec
+            and previous_spec == card["method_spec_sha256"]
+            and reusable_source
+            and _artifact_record_valid(self.workspace, reusable_record)
+        )
+        if reusable:
+            try:
+                validate_spike_report(
+                    self.workspace,
+                    card,
+                    supplemental=False,
+                    source_version=int(reusable_source),
+                )
+            except ContractError:
+                reusable = False
+        if reusable:
+            entry["spike_source_version"] = int(reusable_source)
+            entry["spike"] = reusable_record
+        else:
+            entry["spike_source_version"] = version
+        problems[problem_id] = entry
+        self._save_ledger(ledger)
+        workflow.pop("downgrade_base_spec", None)
+        workflow.pop("downgrade_base_problem", None)
+        workflow.pop("downgrade_claim_ids", None)
+        workflow.pop("revision_base_evidence_levels", None)
+        workflow["supplemental_spike"] = False
+        self._save_project(project)
+        if reusable:
+            method_phase = self._current_phase(workflow)
+            spike_phase = next(item for item in workflow["phases"] if item["id"] == f"spike:{problem_id}")
+            if method_phase:
+                method_phase.update({"status": "completed", "completed_at": _now(), "last_error": ""})
+            spike_phase.update({"status": "completed", "completed_at": _now(), "last_error": "", "reused_from_version": int(reusable_source)})
+            audit_phase = next(item for item in workflow["phases"] if item["id"] == f"method_audit:{problem_id}")
+            workflow["current"] = audit_phase["id"]
+            workflow["mode"] = "method_audit"
+            audit_phase.update({"status": "running", "attempts": int(audit_phase.get("attempts") or 0) + 1, "started_at": _now()})
+            workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+            workflow["review_snapshot"] = workflow["stage_snapshot"]
+            self._save_project(project)
+            await self._switch_session("planner")
+            await self.prompt(self._prompt_for_current(self._project()))
+            return
+        await self._complete_current(project, card)
+
+    async def _finish_spike_v3(
+        self, project: dict[str, Any], spike: dict[str, Any]
+    ) -> None:
+        workflow = project["workflow"]
+        card = self._method_card(workflow)
+        if not card:
+            await self._wait_with_errors(["spike: method card missing"])
+            return
+        ledger = self._ledger()
+        entry = ledger["problems"][card["problem_id"]]
+        source_version = (
+            card["proposal_version"]
+            if workflow.get("supplemental_spike")
+            else int(entry.get("spike_source_version") or card["proposal_version"])
+        )
+        spike_dir = method_version_dir(self.workspace, card["problem_id"], source_version) / "spike"
+        field = "supplemental_spike" if workflow.get("supplemental_spike") else "spike"
+        if workflow.get("supplemental_spike"):
+            spike_dir /= "supplemental"
+            entry["supplemental_used"] = True
+            entry["supplemental_ever_used"] = True
+        report_path = spike_dir / "spike_report.json"
+        paths = [*spike["artifact_paths"], report_path.relative_to(self.workspace).as_posix()]
+        entry[field] = {
+            "source_version": source_version,
+            "method_spec_sha256": card["method_spec_sha256"],
+            "report": _file_record(self.workspace, report_path),
+            "artifact_sha256": {
+                path: hashlib.sha256((self.workspace / path).read_bytes()).hexdigest()
+                for path in paths
+            },
+        }
+        self._save_ledger(ledger)
+        await self._complete_current(project, spike)
+
+    async def _finish_method_audit_v3(self, project: dict[str, Any]) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        card = self._method_card(workflow)
+        if not phase or not card:
+            await self._wait_with_errors(["method_audit: current method card missing"])
+            return
+        try:
+            pending = self._pending_transition(workflow, "method_audit")
+        except ContractError as exc:
+            await self._wait_with_errors([f"method_audit: {exc}"])
+            return
+        if pending:
+            review = pending["review"]
+        else:
+            if workspace_hashes(self.workspace) != (workflow.get("review_snapshot") or {}):
+                await self._wait_with_errors(["artifact_changed: method reviewer modified workspace"])
+                return
+            try:
+                review = parse_method_review(
+                    self._last_assistant_text, problem_id=card["problem_id"]
+                )
+            except ScientificContractError as exc:
+                protocol_attempts = int(phase.get("protocol_attempts") or 0) + 1
+                phase["protocol_attempts"] = protocol_attempts
+                if protocol_attempts < 2:
+                    self._save_project(project)
+                    await self._switch_session("planner")
+                    await self.prompt(self._prompt_for_current(self._project()))
+                else:
+                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                return
+            all_spike_ids = {
+                item["id"]
+                for group in card["spike_spec"].values()
+                for item in group
+            }
+            if not set(review["supplemental_spike_ids"]) <= all_spike_ids:
+                await self._wait_with_errors([
+                    "method_audit: supplemental Spike references unknown planned IDs"
+                ])
+                return
+            self._authorize_transition(project, "method_audit", review)
+        phase["protocol_attempts"] = 0
+        audit_path = method_version_dir(
+            self.workspace, card["problem_id"], card["proposal_version"]
+        ) / f"audit_{int(phase.get('attempts') or 1)}.json"
+        _write_json(audit_path, review)
+        workflow["last_review"] = review
+        ledger = self._ledger()
+        entry = ledger["problems"][card["problem_id"]]
+        entry["ordinary_audits"] = max(
+            int(entry.get("ordinary_audits") or 0),
+            int(phase.get("attempts") or 1),
+        )
+        self._save_ledger(ledger)
+        if review["verdict"] == "accept":
+            try:
+                self._activate_method(workflow, card, audit_path)
+            except (ContractError, OSError, json.JSONDecodeError) as exc:
+                await self._wait_with_errors([f"method_activation: {exc}"])
+                return
+            workflow.pop("review_snapshot", None)
+            workflow["supplemental_spike"] = False
+            workflow.pop("supplemental_spike_ids", None)
+            workflow.pop("pending_transition", None)
+            await self._complete_current(project, None)
+            return
+        if review["verdict"] == "blocked":
+            await self._wait_with_errors([f"method_blocked: {issue}" for issue in review["issues"]])
+            return
+        if review["supplemental_spike"] and not entry.get("supplemental_ever_used"):
+            workflow["supplemental_spike"] = True
+            workflow["supplemental_spike_ids"] = review["supplemental_spike_ids"]
+            workflow["spike_elapsed_seconds"] = 0.0
+            spike_phase = next(item for item in workflow["phases"] if item["id"] == f"spike:{card['problem_id']}")
+            spike_phase.update({"status": "running", "attempts": int(spike_phase.get("attempts") or 1) + 1, "started_at": _now()})
+            phase["status"] = "pending"
+            workflow["current"] = spike_phase["id"]
+            workflow["mode"] = "feasibility_spike"
+            workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+            workflow.pop("pending_transition", None)
+            self._save_project(project)
+            await self._switch_session("worker")
+            await self.prompt(spike_prompt(
+                card,
+                supplemental=True,
+                supplemental_ids=review["supplemental_spike_ids"],
+            ))
+            return
+        audits = int(phase.get("attempts") or 1)
+        if audits < 3:
+            await self._restart_v3_problem_planning(project, review)
+            return
+        downgrade_ok = (
+            bool(review["allowed_downgrades"])
+            and not review["supplemental_spike"]
+            and review["evidence_calibration"] == "fail"
+            and all(
+                review[name] == "pass"
+                for name in (
+                    "statement_alignment", "method_validity", "computational_feasibility",
+                    "validation_independence", "dependency_consistency", "figure_contract",
+                )
+            )
+            and not workflow.get("downgrade_used")
+        )
+        if downgrade_ok:
+            workflow["downgrade_used"] = True
+            await self._restart_v3_problem_planning(project, review, downgrade_only=True)
+            return
+        await self._wait_with_errors([f"method_rejected: {issue}" for issue in review["issues"]])
+
+    async def _start_v3_method_revision_from_science(
+        self, project: dict[str, Any], review: dict[str, Any]
+    ) -> None:
+        workflow = project["workflow"]
+        problem_id = self._phase_problem_id(workflow)
+        if not problem_id:
+            await self._wait_with_errors(["method_rejected: problem missing"])
+            return
+        ledger = self._ledger()
+        entry = (ledger.get("problems") or {}).get(problem_id)
+        if isinstance(entry, dict):
+            entry["status"] = "superseded"
+            self._save_ledger(ledger)
+        await self._restart_v3_problem_planning(project, review)
+
+    async def _settled_v3(self, project: dict[str, Any]) -> None:
+        workflow = project["workflow"]
+        mode = str(workflow.get("mode") or "")
+        stage = str(workflow.get("current") or "")
+        if mode == "inventory_audit":
+            await self._finish_inventory_audit_v3(project)
+            return
+        if mode == "method_audit":
+            await self._finish_method_audit_v3(project)
+            return
+        if mode == "scientific_review":
+            await self._finish_scientific_review(project)
+            return
+        errors, artifact = self._gate_current(project)
+        if stage == "inventory":
+            if errors:
+                inventory_phase = self._current_phase(workflow)
+                if int((inventory_phase or {}).get("attempts") or 1) >= 2:
+                    await self._wait_with_errors(errors)
+                    return
+                synthetic = {"issues": errors, "required_repairs": errors}
+                workflow["last_review"] = synthetic
+                workflow["inventory_version"] = int(workflow.get("inventory_version") or 1) + 1
+                if inventory_phase:
+                    inventory_phase["attempts"] = 2
+                    inventory_phase["last_error"] = "; ".join(errors)[:2000]
+                ledger = self._ledger()
+                ledger["inventory"] = {"version": workflow["inventory_version"], "status": "candidate"}
+                self._save_ledger(ledger)
+                workflow["mode"] = "inventory_revision"
+                workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+                self._save_project(project)
+                await self._switch_session("planner")
+                await self.prompt(inventory_revision_prompt(synthetic, workflow["inventory_version"]))
+            else:
+                assert artifact is not None
+                await self._complete_current(project, artifact)
+            return
+        if stage.startswith("method:"):
+            if errors:
+                phase = self._current_phase(workflow)
+                if int((phase or {}).get("attempts") or 1) >= 3:
+                    await self._wait_with_errors(errors)
+                else:
+                    await self._restart_v3_problem_planning(
+                        project, {"issues": errors, "required_repairs": errors}
+                    )
+            else:
+                assert artifact is not None
+                await self._finish_method_artifact_v3(project, artifact)
+            return
+        if stage.startswith("spike:"):
+            if errors:
+                phase = next(
+                    item for item in workflow["phases"]
+                    if item["id"] == f"method:{self._phase_problem_id(workflow)}"
+                )
+                if int(phase.get("attempts") or 1) >= 3:
+                    await self._wait_with_errors(errors)
+                else:
+                    await self._restart_v3_problem_planning(
+                        project, {"issues": errors, "required_repairs": errors}
+                    )
+            else:
+                assert artifact is not None
+                await self._finish_spike_v3(project, artifact)
+            return
+        if stage.startswith("problem:"):
+            if errors:
+                await self._repair_candidate_v2(errors)
+            else:
+                problem = self._problem(workflow)
+                if not problem:
+                    await self._wait_with_errors(["candidate_protocol: problem missing"])
+                else:
+                    await self._start_scientific_review(project, problem)
+            return
+        if stage == "paper_planning" and errors:
+            phase = self._current_phase(workflow)
+            if phase and int(phase.get("attempts") or 1) < 2:
+                phase["attempts"] = 2
+                workflow["mode"] = "paper_plan_repair"
+                self._save_project(project)
+                await self.prompt(paper_plan_repair_prompt(errors))
+            else:
+                await self._wait_with_errors(errors)
+            return
+        if errors:
+            await self._repair_current(errors)
+        else:
+            await self._complete_current(project, artifact)
 
     async def _settled_v2(self, project: dict[str, Any]) -> None:
         workflow = project["workflow"]
@@ -1865,6 +2996,9 @@ class TaskRuntime:
             if not isinstance(workflow, dict):
                 await self._legacy_settled()
                 return
+            if workflow.get("contract_version") == 3:
+                await self._settled_v3(project)
+                return
             if workflow.get("contract_version") == 2:
                 await self._settled_v2(project)
                 return
@@ -1916,6 +3050,10 @@ def _runtime(task_id: str) -> TaskRuntime:
     project_path = workspace / "project.json"
     if project_path.is_file():
         try:
+            WindowsHostBoundary.recover(task_id, workspace)
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            pass
+        try:
             project = json.loads(project_path.read_text(encoding="utf-8"))
             runtime.status = str(project.get("status") or runtime.status)
             runtime.started_at = str(project.get("started_at") or runtime.started_at)
@@ -1952,7 +3090,7 @@ def _runtime(task_id: str) -> TaskRuntime:
             )
             if (
                 isinstance(workflow, dict)
-                and workflow.get("contract_version") == 2
+                and workflow.get("contract_version") in {2, 3}
                 and (orphaned_active or recoverable_bridge_failure)
             ):
                 runtime.status = "paused"
@@ -2186,15 +3324,36 @@ async def task_status(task_id: str, request: Request) -> dict[str, Any]:
                 "label": str(item.get("label") or item.get("id") or ""),
                 "status": str(item.get("status") or "pending"),
                 "attempts": int(item.get("attempts") or 0),
+                "protocol_attempts": int(item.get("protocol_attempts") or 0),
                 "review_attempts": int(item.get("review_attempts") or 0),
                 "replan_attempts": int(item.get("replan_attempts") or 0),
                 "review_status": str(item.get("review_status") or ""),
                 "scientific_status": str(item.get("scientific_status") or ""),
+                "reused_from_version": int(item.get("reused_from_version") or 0),
                 "last_error": str(item.get("last_error") or ""),
             }
             for item in workflow["phases"]
         ]
         profiles = workflow.get("profiles")
+        if workflow.get("contract_version") == 3:
+            try:
+                ledger = runtime._ledger()
+                for phase in phases:
+                    problem_id = str(phase["id"]).split(":", 1)[1] if ":" in str(phase["id"]) else ""
+                    entry = (ledger.get("problems") or {}).get(problem_id) or {}
+                    if entry:
+                        phase["proposal_version"] = int(entry.get("proposal_version") or 0)
+                        phase["method_status"] = str(entry.get("status") or "")
+                        if str(phase["id"]).startswith("spike:"):
+                            card = runtime._method_card(workflow)
+                            if card and card["problem_id"] == problem_id:
+                                phase["spike_budget_seconds"] = (
+                                    60 if workflow.get("supplemental_spike") else spike_budget(
+                                        card["problem"]["runtime_limit_seconds"]
+                                    )
+                                )
+            except (OSError, json.JSONDecodeError, ContractError):
+                pass
     return {
         "task_id": task_id,
         "status": runtime.status,

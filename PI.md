@@ -7,8 +7,8 @@ This branch uses Pi as the Agent Skills harness. Claude Code is not required.
 - The upstream MathModelAgent skills and paper templates remain unchanged under `skills/`.
 - `pi/skills/mathmodelagent-pi/SKILL.md` maps Claude-oriented wording to Pi tools and enforces stage boundaries.
 - `pi/bridge.py` exposes the local HTTP/WebSocket API, manages one Pi RPC process per task, and advances fresh planning/problem/writing/verification sessions.
-- `pi/staged_workflow.py` validates generated plans and candidates, builds bounded prompts, freezes accepted artifacts, and rejects writes outside the active stage.
-- `pi/scientific_review.py` enforces schema-v2 scientific claims, strict Reviewer verdicts, controlled plan revisions, paper coverage, and manifest evidence.
+- `pi/tool_policy.ts` switches Pi's active tool capability set at each fresh stage: Reviewer sessions receive only `read/grep/find/ls`; maker/worker sessions receive `read/bash/edit/write`.
+- `pi/scientific_review.py` enforces schema-v2 scientific claims, contract-v3 evidence levels, strict Reviewer verdicts, bounded local revisions, paper coverage, and manifest evidence.
 - `scripts/start_web.ps1` starts the Pi bridge and the original Vue interface.
 - The Vue task page shows Pi chat, workflow progress, tool calls, files, cancellation, and paper preview.
 - `scripts/setup_pi.ps1` creates the isolated scientific Python environment.
@@ -63,21 +63,30 @@ powershell -ExecutionPolicy Bypass -File E:\MathModelAgentPi\scripts\start_web.p
 Open `http://127.0.0.1:5173/chat`. The new-project flow is deterministic and does not call a model:
 
 1. Choose an official contest folder such as `A题/` or select loose files.
-2. Click **初始化项目**. The bridge preserves the folder layout under `workspaces/<project-id>/input/`, detects the main problem, and creates `project.json`, `input_manifest.json`, `todo.md`, `reports/`, `code/`, `results/`, `figures/`, and `paper/`.
+2. Click **初始化项目**. The bridge preserves the folder layout under `workspaces/<project-id>/input/`, detects the main problem, and creates `project.json`, `input_manifest.json`, `todo.md`, `planning/`, `reports/`, `code/`, `results/`, `figures/`, and `paper/`.
 3. Review the detected problem and data files, then choose competition, language, paper engine, and two Pi profiles. By default Sol high handles planning/review while Luna high handles execution/writing. Select **规划和执行使用同一模型** for the legacy single-model behavior.
 4. Click **开始执行**. Only this step starts the Pi RPC process.
 
-The bridge runs this contract-v2 sequence:
+The bridge runs this contract-v3 sequence for new projects:
 
 ```text
-Planning → Plan Audit
-→ (Problem candidate → Scientific Review → accepted) × N
-→ Paper Planning → Diagram → Writing → Document Verification
+Problem Inventory → Inventory Audit
+→ (Method Card → Feasibility Spike → Method Audit
+   → Problem candidate → Scientific Review → accepted) × N
+→ Plan Completeness → Paper Planning → Diagram → Writing → Document Verification
 ```
 
-`execution_plan.json` records requested outputs, assumptions, claims, approximations, failure semantics, independent validation, dependencies, and runtime budgets. A fresh Sol session audits the plan before code starts. Luna workers may only submit candidates; a fresh Sol scientific Reviewer must accept each problem before the Host freezes it and starts a dependent problem.
+Inventory declares stable requested-output IDs, exact inputs, dependencies, interpretations, and ambiguities without designing algorithms. Problems then proceed in dependency order. Sol proposes and audits one Method Card; Luna runs a bounded representative Spike; only a strict Method Audit lets the Host append that problem to `execution_plan.json`. Luna then executes it and a fresh Sol scientific Reviewer must accept it before the Host freezes its artifacts. This interleaving lets downstream Spikes use accepted upstream code, evidence, and measured costs.
 
-Reviewer rejection is classified. Implementation/evidence issues return to Luna; method or ambiguity issues receive one controlled Sol replan for the current and unexecuted downstream problems. Contract-v2 projects never enter `waiting`: recoverable failures continue within fixed budgets, while exhausted budgets or indispensable missing input end as explicit `failed` without inventing results.
+Each Method Card declares claims, evidence levels, finite domain, witness/bracket strategy, gap/tail exclusion, approximations, failure semantics, independent validation, figures, and an estimated cost model. `A_certified` means analytic/formal certification; `B_bounded_numerical` means a reproducible finite-domain numerical estimate with uncertainty/convergence and limitations; `C_exploratory` is supplementary and cannot cover a requested output. The Host computes a canonical executable-method hash. Claim-only revisions can reuse a matching Spike; executable changes must rerun it.
+
+The main Spike budget is `max(20, min(120, floor(problem_runtime × 0.10)))` seconds. A Reviewer may request one specific supplemental Spike of at most 60 seconds. Spike code and measurements stay under the active version in `planning/`; they are planning evidence, never formal result or paper evidence. A timeout is a numerical/planning-feasibility failure, not mathematical infeasibility or a domain event.
+
+Reviewer rejection is classified. Reviewer sessions are capability-restricted by the Pi extension to `read/grep/find/ls`; `bash`, `powershell`, `edit`, `write`, and extension tools are absent from the model tool list. The Bridge switches back to `read/bash/edit/write` only after starting a fresh maker/worker session. On Windows, contract-v3 additionally locks `project.json`, `planning/ledger.json`, and a dual-generation checksummed Host journal for the full Pi lifetime. Pi starts suspended, joins a `KILL_ON_JOB_CLOSE` Job Object, and resumes only after assignment; the Host releases control-state locks only after confirmed tree termination. Implementation/evidence issues after execution return to Luna. Method or ambiguity issues supersede only the current problem's provisional Method Card; downstream methods do not yet exist. A Method Card has an initial proposal plus at most two ordinary targeted revisions. Exhaustion ends as `failed`, except that a Reviewer may authorize one final A-to-B calibration when requested outputs are unchanged; Level C is never an automatic fallback. Contract-v3 never enters `waiting`.
+
+The Host appends active Method Cards to a legacy-compatible schema-v2 `execution_plan.json`, composes `reports/ANALYSIS_MODELING_REPORT.md` from accepted versioned reports, and records immutable hashes in `planning/ledger.json`. After every problem passes Scientific Review, deterministic completeness checks require one Inventory entry, accepted Method Card, Method Audit, Scientific Review, and Level A/B coverage for every requested output. The resulting `reports/PLAN_COMPLETENESS.json` is checked again during Document Verification.
+
+Historical contract-v1/v2 workspaces retain their original state machine and are not migrated or resumed as v3.
 
 After all problems are scientifically accepted, Sol creates `paper_plan.json`, mapping every accepted claim to equations, algorithms, result evidence, independent validation, robustness, a non-empty applicability limitation, figures, and citation needs. Page range is advisory; missing scientific content is a hard failure. Luna writes the paper and `paper/paper_manifest.json`; manifest anchors must be unique, non-overlapping, and include a truthful limitation anchor for every claim. The Host also rejects explicit LaTeX bibliography entries that are unused or unresolved, duplicate contents sequences, consecutive forced page breaks, and short reference lists forced onto a separate page. Final Sol Document Verification checks coverage, frozen-number consistency, real and actually cited references, compilation, and every rendered PDF page. A failed document check can route through at most two bounded Luna paper repairs; each repair must render and inspect the cited failed pages before Sol re-verifies them.
 
@@ -85,7 +94,7 @@ Accepted code, results, figures, and reports are SHA-256 frozen. Schema-v2 figur
 
 Each started project keeps its isolated workspace and one persistent Pi RPC process while active, with fresh contexts at stage boundaries. The task page provides live chat, dynamic problem-level progress, review/repair attempts, tool output, workspace downloads, persistent pause/resume, cancellation, and final PDF preview. Closing or refreshing the browser does not cancel Pi.
 
-**Pause and resume:** Pause first writes `status=paused`, the current stage/mode, timestamps, counters, plan version, and review state to `project.json`, then aborts the current agent/tool and terminates the full Pi process tree. Resume starts a new Pi RPC process with the correct frozen profile and reissues the prompt for the persisted mode without consuming an execution or review attempt. A bridge shutdown also persists active contract-v2 tasks as paused; an orphaned `running` task is normalized to paused when loaded after restart. Cancel remains terminal and is not resumable.
+**Pause and resume:** Pause first writes `status=paused`, the current stage/mode, timestamps, counters, plan version, ledger version, Spike elapsed budget, and review state to disk, then aborts the current agent/tool and terminates the full Pi process tree. Resume starts a new Pi RPC process with the correct frozen profile and reissues the prompt for the persisted mode without consuming an execution, proposal, Spike, or review attempt. A bridge shutdown also persists active contract-v2/v3 tasks as paused; an orphaned `running` task is normalized to paused when loaded after restart. Cancel remains terminal and is not resumable.
 
 ## Interactive TUI use
 
@@ -126,10 +135,16 @@ Use `-Model provider/model-id` only when overriding the model already configured
 The staged web workflow writes only to the selected contest workspace:
 
 ```text
+planning/ledger.json
+planning/inventory/v<version>/problem_inventory.json
+planning/inventory/v<version>/audit.json
+planning/methods/<problem-id>/v<version>/method_card.json
+planning/methods/<problem-id>/v<version>/spike/
+planning/methods/<problem-id>/v<version>/audit_<attempt>.json
 execution_plan.json
 paper_plan.json
 project.json
-reports/PLAN_AUDIT.json
+reports/PLAN_COMPLETENESS.json
 reports/<problem-id>_SCIENTIFIC_REVIEW.json
 reports/PAPER_PLAN.md
 code/<problem-id>/

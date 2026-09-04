@@ -71,10 +71,15 @@ export function getTaskStatus(task_id: string) {
 				| "waiting"
 				| "failed";
 			attempts?: number;
+			protocol_attempts?: number;
 			review_attempts?: number;
 			replan_attempts?: number;
 			review_status?: string;
 			scientific_status?: string;
+			reused_from_version?: number;
+			proposal_version?: number;
+			method_status?: string;
+			spike_budget_seconds?: number;
 			last_error?: string;
 		}[];
 	}>(`/task/${task_id}/status`);

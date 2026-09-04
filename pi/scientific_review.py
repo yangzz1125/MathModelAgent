@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -27,6 +28,24 @@ REVIEW_CHECKS = (
     "evidence_sufficiency",
 )
 REVIEW_ISSUES = {"none", "implementation", "method", "ambiguity", "evidence", "blocked"}
+METHOD_REVIEW_CHECKS = (
+    "statement_alignment",
+    "method_validity",
+    "computational_feasibility",
+    "evidence_calibration",
+    "validation_independence",
+    "dependency_consistency",
+    "figure_contract",
+)
+METHOD_REVIEW_ISSUES = {"none", "method", "ambiguity", "evidence", "budget", "blocked"}
+EVIDENCE_LEVELS = {"A_certified", "B_bounded_numerical", "C_exploratory"}
+FAILURE_CATEGORIES = {
+    "domain_event",
+    "mathematical_infeasibility",
+    "numerical_failure",
+    "data_or_input_failure",
+    "decision_outcome",
+}
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
 
@@ -72,7 +91,19 @@ def _relative(value: Any, name: str) -> str:
     return path.as_posix()
 
 
-def validate_problem_science(problem: dict[str, Any], problem_id: str) -> dict[str, Any]:
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def validate_problem_science(
+    problem: dict[str, Any],
+    problem_id: str,
+    *,
+    required_output_ids: set[str] | None = None,
+) -> dict[str, Any]:
     requested = _text_list(problem.get("requested_outputs"), f"{problem_id}.requested_outputs")
     interpretation = _text(problem.get("interpretation"), f"{problem_id}.interpretation")
 
@@ -111,7 +142,7 @@ def validate_problem_science(problem: dict[str, Any], problem_id: str) -> dict[s
         ):
             raise ScientificContractError(f"{claim_id}.acceptance.tolerance must be null or nonnegative finite number")
         claim_ids.add(claim_id)
-        claims.append({
+        claim = {
             "id": claim_id,
             "type": claim_type,
             "statement": _text(item.get("statement"), f"{claim_id}.statement"),
@@ -120,7 +151,38 @@ def validate_problem_science(problem: dict[str, Any], problem_id: str) -> dict[s
                 "criterion": _text(acceptance.get("criterion"), f"{claim_id}.acceptance.criterion"),
                 "tolerance": tolerance,
             },
-        })
+        }
+        if "evidence_level" in item or required_output_ids is not None:
+            evidence_level = _text(item.get("evidence_level"), f"{claim_id}.evidence_level")
+            if evidence_level not in EVIDENCE_LEVELS:
+                raise ScientificContractError(f"unsupported evidence level: {evidence_level}")
+            output_ids = _text_list(
+                item.get("requested_output_ids"),
+                f"{claim_id}.requested_output_ids",
+                empty=True,
+            )
+            if required_output_ids is not None:
+                unknown_outputs = set(output_ids) - required_output_ids
+                if unknown_outputs:
+                    raise ScientificContractError(
+                        f"{claim_id} references unknown requested outputs: {sorted(unknown_outputs)}"
+                    )
+                if evidence_level == "C_exploratory" and output_ids:
+                    raise ScientificContractError(
+                        f"{claim_id} exploratory evidence cannot cover requested outputs"
+                    )
+            claim.update({
+                "evidence_level": evidence_level,
+                "requested_output_ids": output_ids,
+                "limitations": _text_list(
+                    item.get("limitations"), f"{claim_id}.limitations", empty=True
+                ),
+            })
+            if evidence_level in {"B_bounded_numerical", "C_exploratory"} and not claim["limitations"]:
+                raise ScientificContractError(
+                    f"{claim_id}.limitations must be non-empty for bounded/exploratory evidence"
+                )
+        claims.append(claim)
 
     approximations = []
     approximation_ids: set[str] = set()
@@ -139,13 +201,55 @@ def validate_problem_science(problem: dict[str, Any], problem_id: str) -> dict[s
         })
 
     failure_semantics = []
+    failure_conditions: dict[str, str] = {}
+    failure_ids: set[str] = set()
+    event_categories: dict[str, str] = {}
     for index, raw in enumerate(_list(problem.get("failure_semantics"), f"{problem_id}.failure_semantics")):
         item = _object(raw, f"{problem_id}.failure_semantics[{index}]")
-        failure_semantics.append({
-            "condition": _text(item.get("condition"), f"failure_semantics[{index}].condition"),
-            "classification": _text(item.get("classification"), f"failure_semantics[{index}].classification"),
+        if required_output_ids is not None and set(item) != {
+            "id", "event_id", "category", "condition", "action"
+        }:
+            raise ScientificContractError(
+                f"failure_semantics[{index}] v3 keys mismatch"
+            )
+        condition = _text(item.get("condition"), f"failure_semantics[{index}].condition")
+        classification = (
+            _text(item.get("category"), f"failure_semantics[{index}].category")
+            if required_output_ids is not None
+            else _text(item.get("classification"), f"failure_semantics[{index}].classification")
+        )
+        condition_key = " ".join(condition.casefold().split())
+        if condition_key in failure_conditions:
+            raise ScientificContractError(
+                f"duplicate failure condition has ambiguous classifications: {condition!r}"
+            )
+        normalized_failure = {
+            "condition": condition,
             "action": _text(item.get("action"), f"failure_semantics[{index}].action"),
-        })
+        }
+        if required_output_ids is None:
+            normalized_failure["classification"] = classification
+        if required_output_ids is not None:
+            failure_id = _id(item.get("id"), f"failure_semantics[{index}].id")
+            event_id = _id(item.get("event_id"), f"failure_semantics[{index}].event_id")
+            category = _text(item.get("category"), f"failure_semantics[{index}].category")
+            if failure_id in failure_ids:
+                raise ScientificContractError(f"duplicate failure semantic id: {failure_id}")
+            if category not in FAILURE_CATEGORIES:
+                raise ScientificContractError(f"unsupported failure category: {category}")
+            if event_id in event_categories and event_categories[event_id] != category:
+                raise ScientificContractError(
+                    f"failure event {event_id} has conflicting categories"
+                )
+            failure_ids.add(failure_id)
+            event_categories[event_id] = category
+            normalized_failure.update({
+                "id": failure_id,
+                "event_id": event_id,
+                "category": category,
+            })
+        failure_conditions[condition_key] = classification
+        failure_semantics.append(normalized_failure)
 
     validations = []
     validation_ids: set[str] = set()
@@ -169,6 +273,17 @@ def validate_problem_science(problem: dict[str, Any], problem_id: str) -> dict[s
         })
     if covered != claim_ids:
         raise ScientificContractError(f"independent validation does not cover claims: {sorted(claim_ids - covered)}")
+    if required_output_ids is not None:
+        output_coverage = {
+            output_id
+            for claim in claims
+            if claim.get("evidence_level") in {"A_certified", "B_bounded_numerical"}
+            for output_id in claim.get("requested_output_ids", [])
+        }
+        if output_coverage != required_output_ids:
+            raise ScientificContractError(
+                f"requested outputs lack Level A/B claim coverage: {sorted(required_output_ids - output_coverage)}"
+            )
 
     return {
         "requested_outputs": requested,
@@ -237,6 +352,108 @@ def parse_review(text: str, *, review_type: str, problem_id: str | None = None) 
         "issue_class": issue_class,
         "issues": issues,
         "required_repairs": repairs,
+    }
+
+
+def parse_method_review(text: str, *, problem_id: str) -> dict[str, Any]:
+    """Parse the strict read-only method-audit response."""
+    stripped = text.strip()
+    if stripped.startswith("```json") and stripped.endswith("```"):
+        stripped = stripped[7:-3].strip()
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ScientificContractError(f"review is not strict JSON: {exc.msg}") from exc
+    item = _object(value, "method review")
+    expected = {
+        "schema_version",
+        "review_type",
+        "problem_id",
+        "verdict",
+        *METHOD_REVIEW_CHECKS,
+        "issue_class",
+        "issues",
+        "required_repairs",
+        "supplemental_spike",
+        "supplemental_spike_ids",
+        "allowed_downgrades",
+    }
+    unknown = set(item) - expected
+    missing = expected - set(item)
+    if unknown or missing:
+        raise ScientificContractError(
+            f"method review keys mismatch; missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    if (
+        item["schema_version"] != 1
+        or item["review_type"] != "method"
+        or item["problem_id"] != problem_id
+    ):
+        raise ScientificContractError("method review identity mismatch")
+    verdict = item["verdict"]
+    if verdict not in {"accept", "revise", "blocked"}:
+        raise ScientificContractError("method review verdict is invalid")
+    checks = {name: item[name] for name in METHOD_REVIEW_CHECKS}
+    if any(value not in {"pass", "fail"} for value in checks.values()):
+        raise ScientificContractError("method review checks must be pass or fail")
+    issue_class = item["issue_class"]
+    if issue_class not in METHOD_REVIEW_ISSUES:
+        raise ScientificContractError("method review issue_class is invalid")
+    issues = _text_list(item["issues"], "method review.issues", empty=True)
+    repairs = _text_list(item["required_repairs"], "method review.required_repairs", empty=True)
+    if not isinstance(item["supplemental_spike"], bool):
+        raise ScientificContractError("method review supplemental_spike must be boolean")
+    supplemental_ids = _text_list(
+        item["supplemental_spike_ids"],
+        "method review.supplemental_spike_ids",
+        empty=True,
+    )
+    if item["supplemental_spike"] != bool(supplemental_ids):
+        raise ScientificContractError(
+            "supplemental_spike must match non-empty supplemental_spike_ids"
+        )
+    downgrades = []
+    for index, raw in enumerate(
+        _list(item["allowed_downgrades"], "allowed_downgrades", empty=True)
+    ):
+        downgrade = _object(raw, f"allowed_downgrades[{index}]")
+        if set(downgrade) != {"claim_id", "from", "to", "reason"}:
+            raise ScientificContractError("allowed downgrade keys mismatch")
+        if downgrade["from"] != "A_certified" or downgrade["to"] != "B_bounded_numerical":
+            raise ScientificContractError("only A_certified to B_bounded_numerical is allowed")
+        downgrades.append({
+            "claim_id": _id(downgrade["claim_id"], "downgrade.claim_id"),
+            "from": downgrade["from"],
+            "to": downgrade["to"],
+            "reason": _text(downgrade["reason"], "downgrade.reason"),
+        })
+    if verdict == "accept":
+        if (
+            any(value != "pass" for value in checks.values())
+            or issue_class != "none"
+            or issues
+            or repairs
+            or item["supplemental_spike"]
+            or supplemental_ids
+            or downgrades
+        ):
+            raise ScientificContractError("accepted method review must be all-pass")
+    elif issue_class == "none" or not issues:
+        raise ScientificContractError("non-accepted method review requires issues")
+    if verdict == "blocked" and issue_class != "blocked":
+        raise ScientificContractError("blocked method review requires blocked issue_class")
+    return {
+        "schema_version": 1,
+        "review_type": "method",
+        "problem_id": problem_id,
+        "verdict": verdict,
+        **checks,
+        "issue_class": issue_class,
+        "issues": issues,
+        "required_repairs": repairs,
+        "supplemental_spike": item["supplemental_spike"],
+        "supplemental_spike_ids": supplemental_ids,
+        "allowed_downgrades": downgrades,
     }
 
 
@@ -359,8 +576,211 @@ def merge_plan_revision(base: dict[str, Any], revision: dict[str, Any], current_
     return merged
 
 
-def acceptance_chain_errors(workspace: Path, plan: dict[str, Any]) -> list[str]:
+def plan_completeness_receipt(
+    workspace: Path, plan: dict[str, Any], ledger: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Build the deterministic v3 acceptance receipt from current hashes."""
     errors: list[str] = []
+    problem_ids = [problem["id"] for problem in plan.get("problems", [])]
+    inventory = ledger.get("inventory") if isinstance(ledger, dict) else None
+    if not isinstance(inventory, dict) or inventory.get("status") != "accepted":
+        errors.append("plan_completeness: inventory is not accepted")
+        inventory = {}
+    inventory_hash = str(inventory.get("sha256") or "")
+    inventory_audit_hash = ""
+    inventory_path = workspace / str(inventory.get("path") or "")
+    inventory_problems: list[dict[str, Any]] = []
+    if not inventory_hash or not inventory_path.is_file() or hashlib.sha256(inventory_path.read_bytes()).hexdigest() != inventory_hash:
+        errors.append("plan_completeness: inventory hash mismatch")
+    else:
+        try:
+            inventory_value = json.loads(inventory_path.read_text(encoding="utf-8"))
+            raw_problems = inventory_value.get("problems")
+            if not isinstance(raw_problems, list):
+                raise ValueError("problems must be a list")
+            inventory_problems = [
+                problem for problem in raw_problems if isinstance(problem, dict)
+            ]
+            if len(inventory_problems) != len(raw_problems):
+                raise ValueError("problem entry is not an object")
+        except (OSError, ValueError, json.JSONDecodeError, AttributeError) as exc:
+            errors.append(f"plan_completeness: invalid accepted inventory: {exc}")
+    inventory_audit = inventory.get("audit")
+    if not isinstance(inventory_audit, dict):
+        errors.append("plan_completeness: inventory audit is missing")
+    else:
+        audit_path = workspace / str(inventory_audit.get("path") or "")
+        inventory_audit_hash = hashlib.sha256(audit_path.read_bytes()).hexdigest() if audit_path.is_file() else ""
+        if inventory_audit_hash != str(inventory_audit.get("sha256") or ""):
+            errors.append("plan_completeness: inventory audit hash mismatch")
+        else:
+            try:
+                audit = parse_review(
+                    audit_path.read_text(encoding="utf-8"),
+                    review_type="inventory",
+                    problem_id=None,
+                )
+                if audit["verdict"] != "accept":
+                    errors.append("plan_completeness: inventory audit not accepted")
+            except (OSError, ScientificContractError) as exc:
+                errors.append(f"plan_completeness: invalid inventory audit: {exc}")
+    methods = ledger.get("problems") if isinstance(ledger, dict) else None
+    if not isinstance(methods, dict):
+        errors.append("plan_completeness: method ledger is invalid")
+        methods = {}
+    method_hashes: dict[str, str] = {}
+    method_report_hashes: dict[str, str] = {}
+    audit_hashes: dict[str, str] = {}
+    spike_hashes: dict[str, dict[str, str]] = {}
+    supplemental_spike_hashes: dict[str, dict[str, str]] = {}
+    review_hashes: dict[str, str] = {}
+    coverage: dict[str, list[str]] = {}
+    for problem in plan.get("problems", []):
+        problem_id = problem["id"]
+        entry = methods.get(problem_id)
+        if not isinstance(entry, dict) or entry.get("status") != "accepted":
+            errors.append(f"plan_completeness: {problem_id} method is not accepted")
+            entry = {}
+        if str(entry.get("plan_problem_sha256") or "") != _canonical_hash(problem):
+            errors.append(f"plan_completeness: {problem_id} execution plan differs from active method card")
+        for field, target in (
+            ("method_card", method_hashes),
+            ("method_report", method_report_hashes),
+            ("method_audit", audit_hashes),
+        ):
+            record = entry.get(field)
+            if not isinstance(record, dict):
+                errors.append(f"plan_completeness: {problem_id} missing {field}")
+                continue
+            path = workspace / str(record.get("path") or "")
+            expected = str(record.get("sha256") or "")
+            actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+            if not expected or actual != expected:
+                errors.append(f"plan_completeness: {problem_id} {field} hash mismatch")
+            elif field == "method_audit":
+                try:
+                    method_audit = parse_method_review(
+                        path.read_text(encoding="utf-8"), problem_id=problem_id
+                    )
+                    if method_audit["verdict"] != "accept":
+                        errors.append(f"plan_completeness: {problem_id} method audit rejected")
+                except (OSError, ScientificContractError) as exc:
+                    errors.append(f"plan_completeness: invalid {problem_id} method audit: {exc}")
+            target[problem_id] = actual
+        for field, target, required in (
+            ("spike", spike_hashes, True),
+            ("supplemental_spike", supplemental_spike_hashes, bool(entry.get("supplemental_used"))),
+        ):
+            record = entry.get(field)
+            if not isinstance(record, dict):
+                if required:
+                    errors.append(f"plan_completeness: {problem_id} missing {field}")
+                continue
+            artifact_hashes = record.get("artifact_sha256")
+            if not isinstance(artifact_hashes, dict) or not artifact_hashes:
+                errors.append(f"plan_completeness: {problem_id} {field} manifest missing")
+                continue
+            actual_hashes: dict[str, str] = {}
+            for relative, expected_hash in artifact_hashes.items():
+                path = workspace / str(relative)
+                actual_hash = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+                actual_hashes[str(relative)] = actual_hash
+                if actual_hash != expected_hash:
+                    errors.append(f"plan_completeness: {problem_id} {field} artifact hash mismatch: {relative}")
+            report_record = record.get("report")
+            report_path = workspace / str((report_record or {}).get("path") or "")
+            try:
+                spike_report = json.loads(report_path.read_text(encoding="utf-8"))
+                if spike_report.get("method_spec_sha256") != entry.get("method_spec_sha256"):
+                    errors.append(f"plan_completeness: {problem_id} {field} method-spec hash mismatch")
+                declared = set(spike_report.get("artifact_paths") or [])
+                report_relative = report_path.relative_to(workspace).as_posix()
+                if str((report_record or {}).get("sha256") or "") != actual_hashes.get(report_relative):
+                    errors.append(f"plan_completeness: {problem_id} {field} report record mismatch")
+                if set(actual_hashes) != declared | {report_relative}:
+                    errors.append(f"plan_completeness: {problem_id} {field} manifest coverage mismatch")
+            except (OSError, ValueError, json.JSONDecodeError, AttributeError) as exc:
+                errors.append(f"plan_completeness: invalid {problem_id} {field} report: {exc}")
+            target[problem_id] = actual_hashes
+        review_path = workspace / "reports" / f"{problem_id}_SCIENTIFIC_REVIEW.json"
+        try:
+            review = parse_review(
+                review_path.read_text(encoding="utf-8"),
+                review_type="scientific",
+                problem_id=problem_id,
+            )
+            if review["verdict"] != "accept":
+                errors.append(f"plan_completeness: {problem_id} scientific review rejected")
+        except (OSError, ScientificContractError) as exc:
+            errors.append(f"plan_completeness: invalid {problem_id} scientific review: {exc}")
+        review_hashes[problem_id] = (
+            hashlib.sha256(review_path.read_bytes()).hexdigest() if review_path.is_file() else ""
+        )
+        requested = {
+            str(item.get("id") or "")
+            for item in problem.get("requested_output_map", [])
+            if isinstance(item, dict)
+        }
+        covered = {
+            output_id
+            for claim in problem.get("claims", [])
+            if claim.get("evidence_level") in {"A_certified", "B_bounded_numerical"}
+            for output_id in claim.get("requested_output_ids", [])
+        }
+        if requested and covered != requested:
+            errors.append(
+                f"plan_completeness: {problem_id} requested outputs lack Level A/B coverage"
+            )
+        coverage[problem_id] = sorted(covered)
+    if set(methods) != set(problem_ids):
+        errors.append("plan_completeness: inventory/plan/method problem IDs differ")
+    inventory_ids = [str(problem.get("id") or "") for problem in inventory_problems]
+    if inventory_ids != problem_ids:
+        errors.append("plan_completeness: accepted inventory and plan problem order differ")
+    else:
+        for inventory_problem, plan_problem in zip(inventory_problems, plan["problems"]):
+            if inventory_problem.get("requested_outputs") != plan_problem.get("requested_output_map"):
+                errors.append(
+                    f"plan_completeness: {plan_problem['id']} requested outputs differ from inventory"
+                )
+    receipt = {
+        "schema_version": 1,
+        "contract_version": 3,
+        "status": "pass" if not errors else "fail",
+        "plan_version": plan.get("plan_version"),
+        "problem_ids": problem_ids,
+        "inventory_sha256": inventory_hash,
+        "inventory_audit_sha256": inventory_audit_hash,
+        "method_card_sha256": method_hashes,
+        "method_report_sha256": method_report_hashes,
+        "method_audit_sha256": audit_hashes,
+        "spike_artifact_sha256": spike_hashes,
+        "supplemental_spike_artifact_sha256": supplemental_spike_hashes,
+        "scientific_review_sha256": review_hashes,
+        "requested_output_coverage": coverage,
+    }
+    return receipt, errors
+
+
+def acceptance_chain_errors(
+    workspace: Path,
+    plan: dict[str, Any],
+    *,
+    contract_version: int = 2,
+    ledger: dict[str, Any] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    if contract_version == 3:
+        expected, errors = plan_completeness_receipt(workspace, plan, ledger or {})
+        try:
+            actual = json.loads(
+                (workspace / "reports" / "PLAN_COMPLETENESS.json").read_text(encoding="utf-8")
+            )
+            if actual != expected or actual.get("status") != "pass":
+                errors.append("scientific_acceptance: plan completeness receipt mismatch")
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            errors.append(f"scientific_acceptance: invalid completeness receipt: {exc}")
+        return errors
     try:
         audit_text = (workspace / "reports" / "PLAN_AUDIT.json").read_text(encoding="utf-8")
         audit = parse_review(audit_text, review_type="plan", problem_id=None)

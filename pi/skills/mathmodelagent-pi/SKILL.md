@@ -54,19 +54,28 @@ Default to LaTeX when `xelatex` is available and no engine is specified. MCM/ICM
 
 The Pi bridge owns workflow sequencing. Execute only the stage named in the current prompt:
 
-- planning reads `skills/2analysis-modeling/SKILL.md` and stops after planning artifacts;
+- inventory reads the statement and writes only the versioned problem inventory; it does not design methods;
+- inventory and method auditors are read-only and return only the requested strict JSON;
+- a method maker writes one versioned Method Card for the named problem only;
+- a feasibility Spike writes only inside that Method Card version's `spike/` directory and never writes formal results;
 - a problem worker reads `skills/3coding-visual/SKILL.md` plus `pi/skills/mathmodel-figure-quality/SKILL.md`, uses the pinned publication plotting stack, and stops after the named problem;
 - diagram, writing, and verification read only their corresponding upstream skill.
 
-Never continue into another stage on your own. A fresh Pi session may begin each stage, so use workspace files as the only handoff. Treat `input/`, `execution_plan.json`, the global analysis report, and completed problem directories as read-only unless the bridge prompt explicitly says otherwise.
+Never continue into another stage on your own. A fresh Pi session may begin each stage, so use workspace files as the only handoff. Treat `input/`, `execution_plan.json`, `planning/ledger.json`, prior planning versions, the global analysis report, and completed problem directories as read-only unless the bridge prompt explicitly names a new versioned write path.
 
 ## Scientific authority
 
 Planning and execution agents produce proposals, not acceptance decisions. A worker must label result and verification artifacts `candidate`; only the bridge may mark a problem accepted after a fresh scientific Reviewer returns a strict all-pass verdict. Never describe your own candidate as accepted or final.
 
-Reviewer prompts are read-only. Re-read the original statement and generic modeling norms, distrust prior summaries and self-reported checks, and reject undeclared approximations, conflated failure semantics, unsupported optimality/event claims, or validation equivalent to the primary method. Return only the strict JSON requested by the bridge.
+Reviewer prompts are read-only. The Bridge tool-policy extension removes `bash`, `powershell`, `edit`, `write`, and extension tools from every Reviewer session; only `read`, `grep`, `find`, and `ls` remain active. Re-read the original statement and generic modeling norms, distrust prior summaries and self-reported checks, and reject undeclared approximations, conflated failure semantics, unsupported optimality/event claims, or validation equivalent to the primary method. Return only the strict JSON requested by the bridge.
 
-Scientific acceptance happens per problem before artifacts are frozen. Document verification later checks content coverage, numerical consistency, compilation, references, and PDF quality; it does not retroactively replace scientific review. New contract-v2 projects do not wait for manual repair: stay within bounded automatic repair/replan instructions, or fail clearly when evidence or indispensable input cannot be recovered.
+Scientific acceptance happens per problem before artifacts are frozen. Document verification later checks content coverage, numerical consistency, compilation, references, and PDF quality; it does not retroactively replace scientific review. New contract-v3 projects do not wait for manual repair: stay within bounded automatic repair/replan instructions, or fail clearly when evidence or indispensable input cannot be recovered. Historical contract-v1/v2 workspaces keep their original state machine and are never migrated in place.
+
+Contract-v3 uses `Problem Inventory → per-problem Method Card → Feasibility Spike → Method Audit → Candidate → Scientific Review`. Sol high owns makers/auditors for inventory and methods; Luna high owns Spikes and execution. A Method Audit accept is provisional until the same problem passes Scientific Review. Method/ambiguity rejection supersedes only the current version because downstream methods have not yet been planned.
+
+Evidence levels are binding. `A_certified` promises analytic/formal certification. `B_bounded_numerical` promises a finite domain, reproducible resolution, uncertainty/convergence checks, and explicit limitations. `C_exploratory` is supplementary and cannot satisfy a requested output. Do not move the proof target during review. After ordinary Method Audit attempts are exhausted, only a Host-authorized, Reviewer-listed A-to-B calibration may receive one final revision; never downgrade automatically to Level C.
+
+A Spike is planning evidence only. Benchmark representative kernels and obtain requested witnesses/brackets within the Host budget; do not run the full solution or cite Spike artifacts as final scientific evidence. Timeout means computational feasibility is unproven or a numerical process failed. It never proves mathematical infeasibility and never constitutes a domain event.
 
 Run generated model code before reporting a problem complete. Use actual result files and figures as the only source for numerical claims. Every schema-v2 `verification.json` includes `figures`; each generated figure must declare its accepted-claim purpose, generator, real data paths, SciencePlots/API stack, vector master, PNG preview, language, and completed visual checks. Never use bundled template simulation, preview images, examples, or `*_replica` outputs as paper evidence. Ordinary charts use the pinned SciencePlots + Seaborn/Matplotlib stack; existing complex templates are layout references only when the Planner declared their scientific purpose. Report final success only when the verification prompt is active, `reports/VERIFY_REPORT.md` says `PASS`, and the compiled PDF exists and is non-empty.
 

@@ -43,10 +43,15 @@ interface TaskStatus {
 		label: string;
 		status: PhaseStatus;
 		attempts?: number;
+		protocol_attempts?: number;
 		review_attempts?: number;
 		replan_attempts?: number;
 		review_status?: string;
 		scientific_status?: string;
+		reused_from_version?: number;
+		proposal_version?: number;
+		method_status?: string;
+		spike_budget_seconds?: number;
 		last_error?: string;
 	}[];
 	paper_url: string | null;
@@ -150,6 +155,10 @@ onBeforeUnmount(() => {
               <div class="text-xs text-gray-500">
                 阶段 {{ index + 1 }} / {{ status?.phases.length || 0 }}
                 <span v-if="phase.attempts"> · 执行 {{ phase.attempts }}</span>
+                <span v-if="phase.proposal_version"> · 方法 v{{ phase.proposal_version }}</span>
+                <span v-if="phase.spike_budget_seconds"> · 探针 ≤ {{ phase.spike_budget_seconds }}s</span>
+                <span v-if="phase.reused_from_version"> · 复用 v{{ phase.reused_from_version }}</span>
+                <span v-if="phase.protocol_attempts"> · 协议重试 {{ phase.protocol_attempts }}</span>
                 <span v-if="phase.review_attempts"> · 审查 {{ phase.review_attempts }}</span>
                 <span v-if="phase.replan_attempts"> · 重规划 {{ phase.replan_attempts }}</span>
               </div>

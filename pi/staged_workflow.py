@@ -26,6 +26,8 @@ V2_FINAL_PHASES = (
     ("paper_planning", "论文内容规划"),
     *FINAL_PHASES,
 )
+V3_FINAL_PHASES = V2_FINAL_PHASES
+EVIDENCE_LEVELS = {"A_certified", "B_bounded_numerical", "C_exploratory"}
 
 
 class ContractError(ValueError):
@@ -39,6 +41,505 @@ def relative_path(value: Any) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ContractError(f"unsafe relative path: {value}")
     return path.as_posix()
+
+
+def canonical_hash(value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _file_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ContractError(f"missing {label}") from exc
+    except json.JSONDecodeError as exc:
+        raise ContractError(f"{label} is invalid JSON: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise ContractError(f"{label} must be an object")
+    return value
+
+
+def inventory_path(workspace: Path, version: int) -> Path:
+    return workspace / "planning" / "inventory" / f"v{version}" / "problem_inventory.json"
+
+
+def validate_problem_inventory(workspace: Path, version: int) -> dict[str, Any]:
+    path = inventory_path(workspace, version)
+    raw = _file_object(path, path.relative_to(workspace).as_posix())
+    if set(raw) != {"schema_version", "problems"} or raw.get("schema_version") != 1:
+        raise ContractError("problem inventory requires schema_version=1 and problems only")
+    problems = raw.get("problems")
+    if not isinstance(problems, list) or not problems or len(problems) > 20:
+        raise ContractError("problem inventory problems must contain 1..20 entries")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    output_ids: set[str] = set()
+    for index, raw_problem in enumerate(problems):
+        if not isinstance(raw_problem, dict):
+            raise ContractError(f"inventory problems[{index}] must be an object")
+        expected_problem_keys = {
+            "id", "label", "depends_on", "requested_outputs", "input_paths",
+            "interpretation", "ambiguities", "suggested_evidence_level",
+        }
+        if set(raw_problem) != expected_problem_keys:
+            raise ContractError(f"inventory problems[{index}] keys mismatch")
+        problem_id = str(raw_problem.get("id") or "")
+        if not PROBLEM_ID_RE.fullmatch(problem_id) or problem_id in seen:
+            raise ContractError(f"invalid or duplicate inventory problem id: {problem_id!r}")
+        label = str(raw_problem.get("label") or "").strip()
+        interpretation = str(raw_problem.get("interpretation") or "").strip()
+        if not label or not interpretation:
+            raise ContractError(f"{problem_id} requires label and interpretation")
+        dependencies = _string_list(
+            raw_problem.get("depends_on", []),
+            f"{problem_id}.depends_on",
+            allow_empty=True,
+        )
+        unknown = [dependency for dependency in dependencies if dependency not in seen]
+        if unknown or len(set(dependencies)) != len(dependencies):
+            raise ContractError(f"{problem_id} has invalid dependency order: {unknown}")
+        requested_raw = raw_problem.get("requested_outputs")
+        if not isinstance(requested_raw, list) or not requested_raw:
+            raise ContractError(f"{problem_id}.requested_outputs must be non-empty")
+        requested = []
+        for output_index, raw_output in enumerate(requested_raw):
+            if not isinstance(raw_output, dict) or set(raw_output) != {"id", "statement"}:
+                raise ContractError(f"{problem_id}.requested_outputs[{output_index}] is invalid")
+            output_id = str(raw_output.get("id") or "")
+            statement = str(raw_output.get("statement") or "").strip()
+            if not re.fullmatch(r"^[a-z][a-z0-9_.-]{0,63}$", output_id) or output_id in output_ids:
+                raise ContractError(f"invalid or duplicate requested output id: {output_id!r}")
+            if not statement:
+                raise ContractError(f"{output_id}.statement is empty")
+            output_ids.add(output_id)
+            requested.append({"id": output_id, "statement": statement})
+        inputs = [
+            relative_path(value)
+            for value in _string_list(raw_problem.get("input_paths"), f"{problem_id}.input_paths")
+        ]
+        for input_path_value in inputs:
+            if not (
+                input_path_value == "input_manifest.json"
+                or input_path_value.startswith("input/")
+            ):
+                raise ContractError(f"{problem_id} inventory input is outside input/: {input_path_value}")
+            if not (workspace / input_path_value).exists():
+                raise ContractError(f"{problem_id} inventory input does not exist: {input_path_value}")
+        ambiguities_raw = raw_problem.get("ambiguities")
+        if not isinstance(ambiguities_raw, list):
+            raise ContractError(f"{problem_id}.ambiguities must be a list")
+        ambiguities = []
+        ambiguity_ids: set[str] = set()
+        for ambiguity_index, raw_ambiguity in enumerate(ambiguities_raw):
+            if not isinstance(raw_ambiguity, dict) or set(raw_ambiguity) != {
+                "id", "interpretations", "impact", "resolution_needed"
+            }:
+                raise ContractError(f"{problem_id}.ambiguities[{ambiguity_index}] is invalid")
+            ambiguity_id = str(raw_ambiguity.get("id") or "")
+            if not re.fullmatch(r"^[a-z][a-z0-9_.-]{0,63}$", ambiguity_id) or ambiguity_id in ambiguity_ids:
+                raise ContractError(f"invalid or duplicate ambiguity id: {ambiguity_id!r}")
+            ambiguity_ids.add(ambiguity_id)
+            ambiguities.append({
+                "id": ambiguity_id,
+                "interpretations": _string_list(
+                    raw_ambiguity.get("interpretations"),
+                    f"{ambiguity_id}.interpretations",
+                ),
+                "impact": str(raw_ambiguity.get("impact") or "").strip(),
+                "resolution_needed": str(raw_ambiguity.get("resolution_needed") or "").strip(),
+            })
+            if not ambiguities[-1]["impact"] or not ambiguities[-1]["resolution_needed"]:
+                raise ContractError(f"{ambiguity_id} requires impact and resolution_needed")
+        evidence_level = str(raw_problem.get("suggested_evidence_level") or "")
+        if evidence_level not in EVIDENCE_LEVELS:
+            raise ContractError(f"{problem_id}.suggested_evidence_level is invalid")
+        normalized.append({
+            "id": problem_id,
+            "label": label,
+            "depends_on": dependencies,
+            "requested_outputs": requested,
+            "input_paths": inputs,
+            "interpretation": interpretation,
+            "ambiguities": ambiguities,
+            "suggested_evidence_level": evidence_level,
+        })
+        seen.add(problem_id)
+    return {"schema_version": 1, "problems": normalized}
+
+
+def method_version_dir(workspace: Path, problem_id: str, version: int) -> Path:
+    return workspace / "planning" / "methods" / problem_id / f"v{version}"
+
+
+def method_spec_hash(card: dict[str, Any]) -> str:
+    problem = card["problem"]
+    claim_contracts = [
+        {
+            key: value
+            for key, value in claim.items()
+            if key != "statement"
+        }
+        for claim in problem["claims"]
+    ]
+    normalized_failure_semantics = []
+    for failure in card["problem"]["failure_semantics"]:
+        item = dict(failure)
+        item.pop("classification", None)
+        normalized_failure_semantics.append(item)
+    return canonical_hash({
+        "method": problem["method"],
+        "inputs": problem["inputs"],
+        "outputs": problem["outputs"],
+        "validation": problem["validation"],
+        "runtime_limit_seconds": problem["runtime_limit_seconds"],
+        "requested_outputs": problem["requested_outputs"],
+        "interpretation": problem["interpretation"],
+        "assumptions": problem["assumptions"],
+        "claims": claim_contracts,
+        "failure_semantics": normalized_failure_semantics,
+        "independent_validation": problem["independent_validation"],
+        "figure_specs": problem["figure_specs"],
+        "finite_domain": card["finite_domain"],
+        "witness_strategy": card["witness_strategy"],
+        "gap_or_tail_exclusion": card["gap_or_tail_exclusion"],
+        "cost_model": card["cost_model"],
+        "spike_spec": card["spike_spec"],
+        "approximations": problem["approximations"],
+    })
+
+
+def _positive_number(value: Any, field: str, *, allow_zero: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ContractError(f"{field} must be finite numeric")
+    number = float(value)
+    if number < 0 or (number == 0 and not allow_zero):
+        raise ContractError(f"{field} must be {'nonnegative' if allow_zero else 'positive'}")
+    return number
+
+
+def _identified_specs(
+    value: Any, field: str, *, allow_empty: bool = False
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise ContractError(f"{field} must be {'a list' if allow_empty else 'a non-empty list'}")
+    normalized = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict) or set(raw) != {"id", "description"}:
+            raise ContractError(f"{field}[{index}] must have id and description")
+        item_id = str(raw.get("id") or "")
+        description = str(raw.get("description") or "").strip()
+        if not re.fullmatch(r"^[a-z][a-z0-9_.-]{0,63}$", item_id) or item_id in seen:
+            raise ContractError(f"{field}[{index}] has invalid or duplicate id")
+        if not description:
+            raise ContractError(f"{field}[{index}].description is empty")
+        seen.add(item_id)
+        normalized.append({"id": item_id, "description": description})
+    return normalized
+
+
+def validate_method_card(
+    workspace: Path,
+    inventory: dict[str, Any],
+    problem_id: str,
+    version: int,
+) -> dict[str, Any]:
+    directory = method_version_dir(workspace, problem_id, version)
+    raw = _file_object(directory / "method_card.json", f"{problem_id} method card")
+    expected = {
+        "schema_version", "inventory_sha256", "proposal_version", "problem_id",
+        "problem", "finite_domain", "witness_strategy", "gap_or_tail_exclusion",
+        "cost_model", "spike_spec",
+    }
+    if set(raw) != expected or raw.get("schema_version") != 1:
+        raise ContractError(f"{problem_id} method card keys/schema mismatch")
+    if raw.get("problem_id") != problem_id or raw.get("proposal_version") != version:
+        raise ContractError(f"{problem_id} method card identity/version mismatch")
+    inventory_hash = canonical_hash(inventory)
+    if raw.get("inventory_sha256") != inventory_hash:
+        raise ContractError(f"{problem_id} method card inventory hash mismatch")
+    inventory_problem = next(
+        (item for item in inventory["problems"] if item["id"] == problem_id), None
+    )
+    if not inventory_problem:
+        raise ContractError(f"{problem_id} is absent from accepted inventory")
+    problem = raw.get("problem")
+    if not isinstance(problem, dict):
+        raise ContractError(f"{problem_id}.problem must be an object")
+    if problem.get("id") != problem_id or problem.get("label") != inventory_problem["label"]:
+        raise ContractError(f"{problem_id} problem identity differs from inventory")
+    dependencies = _string_list(problem.get("depends_on", []), f"{problem_id}.depends_on", allow_empty=True)
+    if dependencies != inventory_problem["depends_on"]:
+        raise ContractError(f"{problem_id} dependencies differ from inventory")
+    method = str(problem.get("method") or "").strip()
+    if not method:
+        raise ContractError(f"{problem_id}.method is empty")
+    inputs = [relative_path(value) for value in _string_list(problem.get("inputs"), f"{problem_id}.inputs")]
+    allowed_inputs = ("input/", "input_manifest.json", "reports/ANALYSIS_MODELING_REPORT.md")
+    dependency_prefixes = tuple(
+        prefix
+        for dependency in dependencies
+        for prefix in (f"code/{dependency}/", f"results/{dependency}/", f"reports/{dependency}_RESULTS.md")
+    )
+    for input_path_value in inputs:
+        if not input_path_value.startswith(allowed_inputs + dependency_prefixes):
+            raise ContractError(f"{problem_id} input is outside dependency boundary: {input_path_value}")
+        if not (workspace / input_path_value).exists() and input_path_value != "reports/ANALYSIS_MODELING_REPORT.md":
+            raise ContractError(f"{problem_id} input does not exist: {input_path_value}")
+    outputs = [relative_path(value) for value in _string_list(problem.get("outputs"), f"{problem_id}.outputs")]
+    allowed_outputs = (
+        f"code/{problem_id}/", f"results/{problem_id}/", f"figures/{problem_id}/",
+        f"reports/{problem_id}_RESULTS.md",
+    )
+    if any(not output.startswith(allowed_outputs) for output in outputs):
+        raise ContractError(f"{problem_id} output is outside its artifact boundary")
+    if not all(any(output.startswith(scope) for output in outputs) for scope in allowed_outputs[:2] + allowed_outputs[3:]):
+        raise ContractError(f"{problem_id} must declare code, result, and report outputs")
+    validation = _string_list(problem.get("validation"), f"{problem_id}.validation")
+    runtime = problem.get("runtime_limit_seconds")
+    if isinstance(runtime, bool) or not isinstance(runtime, int) or not 5 <= runtime <= 3600:
+        raise ContractError(f"{problem_id}.runtime_limit_seconds must be 5..3600")
+    requested_map = inventory_problem["requested_outputs"]
+    requested_statements = [item["statement"] for item in requested_map]
+    if problem.get("requested_outputs") != requested_statements:
+        raise ContractError(f"{problem_id}.requested_outputs differ from inventory")
+    required_output_ids = {item["id"] for item in requested_map}
+    try:
+        science = validate_problem_science(
+            problem, problem_id, required_output_ids=required_output_ids
+        )
+        figures = validate_figure_specs({
+            **problem,
+            "inputs": inputs,
+            "outputs": outputs,
+            "claims": science["claims"],
+        })
+    except (ScientificContractError, ValueError) as exc:
+        raise ContractError(str(exc)) from exc
+    normalized_problem = {
+        "id": problem_id,
+        "label": inventory_problem["label"],
+        "depends_on": dependencies,
+        "method": method,
+        "inputs": inputs,
+        "outputs": outputs,
+        "validation": validation,
+        "runtime_limit_seconds": runtime,
+        **science,
+        "figure_specs": figures,
+        "requested_output_map": requested_map,
+    }
+    text_fields = ("finite_domain", "witness_strategy", "gap_or_tail_exclusion")
+    normalized = {
+        "schema_version": 1,
+        "inventory_sha256": inventory_hash,
+        "proposal_version": version,
+        "problem_id": problem_id,
+        "problem": normalized_problem,
+        **{field: str(raw.get(field) or "").strip() for field in text_fields},
+    }
+    if any(not normalized[field] for field in text_fields):
+        raise ContractError(f"{problem_id} method domain/witness/exclusion fields are required")
+    cost = raw.get("cost_model")
+    if not isinstance(cost, dict) or set(cost) != {
+        "operation", "estimated_operations", "estimated_seconds", "memory_mb", "scaling"
+    }:
+        raise ContractError(f"{problem_id}.cost_model keys mismatch")
+    normalized["cost_model"] = {
+        "operation": str(cost.get("operation") or "").strip(),
+        "estimated_operations": _positive_number(cost.get("estimated_operations"), "estimated_operations"),
+        "estimated_seconds": _positive_number(cost.get("estimated_seconds"), "estimated_seconds"),
+        "memory_mb": _positive_number(cost.get("memory_mb"), "memory_mb"),
+        "scaling": str(cost.get("scaling") or "").strip(),
+    }
+    if not normalized["cost_model"]["operation"] or not normalized["cost_model"]["scaling"]:
+        raise ContractError(f"{problem_id}.cost_model text fields are required")
+    spike = raw.get("spike_spec")
+    if not isinstance(spike, dict) or set(spike) != {
+        "questions", "representative_cases", "required_metrics", "required_witnesses"
+    }:
+        raise ContractError(f"{problem_id}.spike_spec keys mismatch")
+    normalized["spike_spec"] = {
+        field: _identified_specs(
+            spike.get(field),
+            f"{problem_id}.spike_spec.{field}",
+            allow_empty=field == "required_witnesses",
+        )
+        for field in ("questions", "representative_cases", "required_metrics", "required_witnesses")
+    }
+    all_spike_ids = [
+        item["id"]
+        for field in normalized["spike_spec"].values()
+        for item in field
+    ]
+    if len(all_spike_ids) != len(set(all_spike_ids)):
+        raise ContractError(f"{problem_id}.spike_spec IDs must be globally unique")
+    normalized["method_spec_sha256"] = method_spec_hash(normalized)
+    return normalized
+
+
+def spike_budget(runtime_limit_seconds: int) -> int:
+    return max(20, min(120, math.floor(runtime_limit_seconds * 0.10)))
+
+
+def validate_spike_report(
+    workspace: Path,
+    card: dict[str, Any],
+    *,
+    supplemental: bool = False,
+    source_version: int | None = None,
+    supplemental_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    directory = method_version_dir(
+        workspace,
+        card["problem_id"],
+        source_version or card["proposal_version"],
+    ) / "spike"
+    if supplemental:
+        directory /= "supplemental"
+    path = directory / "spike_report.json"
+    raw = _file_object(path, path.relative_to(workspace).as_posix())
+    required = {
+        "schema_version", "status", "problem_id", "method_spec_sha256",
+        "budget_seconds", "actual_runtime_seconds", "answered_question_ids",
+        "probe_scope", "benchmarks",
+        "estimated_full_runtime_seconds", "peak_memory_mb", "witnesses",
+        "unresolved_risks", "artifact_paths",
+    }
+    if set(raw) != required or raw.get("schema_version") != 1 or raw.get("status") != "candidate":
+        raise ContractError("spike report keys/schema/status mismatch")
+    if raw.get("problem_id") != card["problem_id"] or raw.get("method_spec_sha256") != card["method_spec_sha256"]:
+        raise ContractError("spike report identity or method-spec hash mismatch")
+    budget = raw.get("budget_seconds")
+    expected_budget = 60 if supplemental else spike_budget(card["problem"]["runtime_limit_seconds"])
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1 or budget > expected_budget:
+        raise ContractError(f"spike budget exceeds {expected_budget} seconds")
+    actual = _positive_number(raw.get("actual_runtime_seconds"), "actual_runtime_seconds", allow_zero=True)
+    if actual > budget:
+        raise ContractError("spike actual runtime exceeds declared budget")
+    question_ids = _string_list(
+        raw.get("answered_question_ids"),
+        "spike.answered_question_ids",
+        allow_empty=supplemental,
+    )
+    scope = _string_list(
+        raw.get("probe_scope"), "spike.probe_scope", allow_empty=supplemental
+    )
+    benchmarks_raw = raw.get("benchmarks")
+    if not isinstance(benchmarks_raw, list) or (not benchmarks_raw and not supplemental):
+        raise ContractError("spike benchmarks must be a list and primary benchmarks are non-empty")
+    benchmarks = []
+    for index, metric in enumerate(benchmarks_raw):
+        if not isinstance(metric, dict) or set(metric) != {
+            "metric_id", "name", "operations", "seconds", "throughput", "unit"
+        }:
+            raise ContractError(f"spike benchmark {index} keys mismatch")
+        operations = _positive_number(metric.get("operations"), f"benchmark[{index}].operations")
+        seconds = _positive_number(metric.get("seconds"), f"benchmark[{index}].seconds")
+        throughput = _positive_number(metric.get("throughput"), f"benchmark[{index}].throughput")
+        expected_throughput = operations / seconds
+        if abs(throughput - expected_throughput) > max(1e-9, expected_throughput * 0.05):
+            raise ContractError(f"spike benchmark {index} throughput is inconsistent")
+        benchmarks.append({
+            "metric_id": str(metric.get("metric_id") or ""),
+            "name": str(metric.get("name") or "").strip(),
+            "operations": operations,
+            "seconds": seconds,
+            "throughput": throughput,
+            "unit": str(metric.get("unit") or "").strip(),
+        })
+        if not benchmarks[-1]["name"] or not benchmarks[-1]["unit"]:
+            raise ContractError(f"spike benchmark {index} text fields are required")
+    witnesses_raw = raw.get("witnesses")
+    if not isinstance(witnesses_raw, list):
+        raise ContractError("spike witnesses must be a list")
+    witnesses = []
+    for index, witness in enumerate(witnesses_raw):
+        if not isinstance(witness, dict) or set(witness) != {
+            "witness_id", "type", "summary", "artifact_paths"
+        }:
+            raise ContractError(f"spike witness {index} keys mismatch")
+        witnesses.append({
+            "witness_id": str(witness.get("witness_id") or ""),
+            "type": str(witness.get("type") or "").strip(),
+            "summary": str(witness.get("summary") or "").strip(),
+            "artifact_paths": [relative_path(value) for value in _string_list(witness.get("artifact_paths"), f"witness[{index}].artifact_paths")],
+        })
+        if not witnesses[-1]["type"] or not witnesses[-1]["summary"]:
+            raise ContractError(f"spike witness {index} text fields are required")
+    full_expected = {
+        "questions": {item["id"] for item in card["spike_spec"]["questions"]},
+        "cases": {item["id"] for item in card["spike_spec"]["representative_cases"]},
+        "metrics": {item["id"] for item in card["spike_spec"]["required_metrics"]},
+        "witnesses": {item["id"] for item in card["spike_spec"]["required_witnesses"]},
+    }
+    all_expected = set().union(*full_expected.values())
+    if supplemental:
+        selected = supplemental_ids or set()
+        if not selected or not selected <= all_expected:
+            raise ContractError("supplemental Spike IDs are missing or invalid")
+        expected_by_kind = {
+            name: expected_ids & selected
+            for name, expected_ids in full_expected.items()
+        }
+    else:
+        expected_by_kind = full_expected
+    expected_questions = expected_by_kind["questions"]
+    expected_cases = expected_by_kind["cases"]
+    expected_metrics = expected_by_kind["metrics"]
+    expected_witnesses = expected_by_kind["witnesses"]
+    coverage = {
+        "questions": set(question_ids),
+        "cases": set(scope),
+        "metrics": {item["metric_id"] for item in benchmarks},
+        "witnesses": {item["witness_id"] for item in witnesses},
+    }
+    if (
+        len(question_ids) != len(coverage["questions"])
+        or len(scope) != len(coverage["cases"])
+        or len(benchmarks) != len(coverage["metrics"])
+        or len(witnesses) != len(coverage["witnesses"])
+    ):
+        raise ContractError("spike coverage IDs must not be duplicated")
+    for name, expected_ids in (
+        ("questions", expected_questions),
+        ("cases", expected_cases),
+        ("metrics", expected_metrics),
+        ("witnesses", expected_witnesses),
+    ):
+        if coverage[name] != expected_ids:
+            raise ContractError(
+                f"spike {name} coverage mismatch; missing={sorted(expected_ids - coverage[name])}, unknown={sorted(coverage[name] - expected_ids)}"
+            )
+    artifact_paths = [relative_path(value) for value in _string_list(raw.get("artifact_paths"), "spike.artifact_paths")]
+    relative_directory = directory.relative_to(workspace).as_posix() + "/"
+    for artifact in artifact_paths:
+        if not artifact.startswith(relative_directory) or not (workspace / artifact).is_file():
+            raise ContractError(f"spike artifact is missing or out of scope: {artifact}")
+    probe_path = (directory / "probe.py").relative_to(workspace).as_posix()
+    if not (directory / "probe.py").is_file() or probe_path not in artifact_paths:
+        raise ContractError("spike probe.py is missing from declared artifacts")
+    declared = set(artifact_paths)
+    witness_artifacts = {
+        path for witness in witnesses for path in witness["artifact_paths"]
+    }
+    if not witness_artifacts <= declared:
+        raise ContractError("spike witness artifacts must be declared in artifact_paths")
+    return {
+        **raw,
+        "answered_question_ids": question_ids,
+        "probe_scope": scope,
+        "benchmarks": benchmarks,
+        "actual_runtime_seconds": actual,
+        "estimated_full_runtime_seconds": _positive_number(raw.get("estimated_full_runtime_seconds"), "estimated_full_runtime_seconds", allow_zero=True),
+        "peak_memory_mb": _positive_number(raw.get("peak_memory_mb"), "peak_memory_mb", allow_zero=True),
+        "witnesses": witnesses,
+        "unresolved_risks": _string_list(raw.get("unresolved_risks"), "spike.unresolved_risks", allow_empty=True),
+        "artifact_paths": artifact_paths,
+    }
 
 
 def _string_list(value: Any, field: str, *, allow_empty: bool = False) -> list[str]:
@@ -150,8 +651,29 @@ def validate_execution_plan(workspace: Path) -> dict[str, Any]:
             "runtime_limit_seconds": runtime,
         }
         if schema_version == 2:
+            requested_map = item.get("requested_output_map")
+            required_output_ids: set[str] | None = None
+            normalized_requested_map = None
+            if requested_map is not None:
+                if not isinstance(requested_map, list) or not requested_map:
+                    raise ContractError(f"{problem_id}.requested_output_map must be non-empty")
+                normalized_requested_map = []
+                required_output_ids = set()
+                for output_index, raw_output in enumerate(requested_map):
+                    if not isinstance(raw_output, dict) or set(raw_output) != {"id", "statement"}:
+                        raise ContractError(f"{problem_id}.requested_output_map[{output_index}] is invalid")
+                    output_id = str(raw_output.get("id") or "")
+                    statement = str(raw_output.get("statement") or "").strip()
+                    if not re.fullmatch(r"^[a-z][a-z0-9_.-]{0,63}$", output_id) or output_id in required_output_ids:
+                        raise ContractError(f"invalid or duplicate requested output id: {output_id!r}")
+                    required_output_ids.add(output_id)
+                    normalized_requested_map.append({"id": output_id, "statement": statement})
+                if [entry["statement"] for entry in normalized_requested_map] != item.get("requested_outputs"):
+                    raise ContractError(f"{problem_id}.requested_output_map differs from requested_outputs")
             try:
-                science = validate_problem_science(item, problem_id)
+                science = validate_problem_science(
+                    item, problem_id, required_output_ids=required_output_ids
+                )
             except ScientificContractError as exc:
                 raise ContractError(str(exc)) from exc
             claim_ids = {claim["id"] for claim in science["claims"]}
@@ -165,6 +687,8 @@ def validate_execution_plan(workspace: Path) -> dict[str, Any]:
             all_claim_ids.update(claim_ids)
             all_approximation_ids.update(approximation_ids)
             normalized_problem.update(science)
+            if normalized_requested_map is not None:
+                normalized_problem["requested_output_map"] = normalized_requested_map
             try:
                 normalized_problem["figure_specs"] = validate_figure_specs({
                     **item,
@@ -186,10 +710,11 @@ def validate_execution_plan(workspace: Path) -> dict[str, Any]:
 def initial_workflow(
     planner: dict[str, str], worker: dict[str, str], *, contract_version: int = 1
 ) -> dict[str, Any]:
+    first_id = "inventory" if contract_version == 3 else "planning"
     phases = [
         {
-            "id": "planning",
-            "label": "赛题分析与建模",
+            "id": first_id,
+            "label": "问题清单" if contract_version == 3 else "赛题分析与建模",
             "status": "running",
             "attempts": 1,
             "started_at": None,
@@ -197,11 +722,11 @@ def initial_workflow(
             "last_error": "",
         }
     ]
-    if contract_version == 2:
+    if contract_version in {2, 3}:
         phases.append(
             {
-                "id": "plan_audit",
-                "label": "独立计划审查",
+                "id": "inventory_audit" if contract_version == 3 else "plan_audit",
+                "label": "问题清单审查" if contract_version == 3 else "独立计划审查",
                 "status": "pending",
                 "attempts": 0,
                 "started_at": None,
@@ -212,32 +737,57 @@ def initial_workflow(
     return {
         "schema_version": 1,
         "contract_version": contract_version,
-        "plan_version": 1,
-        "current": "planning",
-        "mode": "run",
+        "plan_version": 0 if contract_version == 3 else 1,
+        "current": first_id,
+        "mode": first_id if contract_version == 3 else "run",
         "profiles": {"planner": planner, "worker": worker},
         "phases": phases,
         "frozen": {},
+        **({"inventory_version": 1} if contract_version == 3 else {}),
     }
 
 
 def expand_problem_phases(workflow: dict[str, Any], plan: dict[str, Any]) -> None:
-    prefix_count = 2 if workflow.get("contract_version") == 2 else 1
+    contract_version = workflow.get("contract_version")
+    prefix_count = 2 if contract_version in {2, 3} else 1
     prefix = workflow["phases"][:prefix_count]
-    final_phases = V2_FINAL_PHASES if workflow.get("contract_version") == 2 else FINAL_PHASES
-    workflow["phases"] = prefix + [
-        {
-            "id": f"problem:{problem['id']}",
-            "problem_id": problem["id"],
-            "label": problem["label"],
-            "status": "pending",
-            "attempts": 0,
-            "started_at": None,
-            "completed_at": None,
-            "last_error": "",
-        }
-        for problem in plan["problems"]
-    ] + [
+    if contract_version == 3:
+        problem_phases = []
+        for problem in plan["problems"]:
+            problem_id = problem["id"]
+            for kind, label in (
+                ("method", f"{problem['label']}：方法设计"),
+                ("spike", f"{problem['label']}：可行性探针"),
+                ("method_audit", f"{problem['label']}：方法审查"),
+                ("problem", problem["label"]),
+            ):
+                problem_phases.append({
+                    "id": f"{kind}:{problem_id}",
+                    "problem_id": problem_id,
+                    "label": label,
+                    "status": "pending",
+                    "attempts": 0,
+                    "started_at": None,
+                    "completed_at": None,
+                    "last_error": "",
+                })
+        final_phases = V3_FINAL_PHASES
+    else:
+        problem_phases = [
+            {
+                "id": f"problem:{problem['id']}",
+                "problem_id": problem["id"],
+                "label": problem["label"],
+                "status": "pending",
+                "attempts": 0,
+                "started_at": None,
+                "completed_at": None,
+                "last_error": "",
+            }
+            for problem in plan["problems"]
+        ]
+        final_phases = V2_FINAL_PHASES if contract_version == 2 else FINAL_PHASES
+    workflow["phases"] = prefix + problem_phases + [
         {
             "id": phase_id,
             "label": label,
@@ -370,7 +920,12 @@ def workspace_hashes(workspace: Path) -> dict[str, str]:
 
 
 def stage_scope_errors(
-    workspace: Path, baseline: dict[str, str], stage: str
+    workspace: Path,
+    baseline: dict[str, str],
+    stage: str,
+    *,
+    planning_version: int = 1,
+    supplemental_spike: bool = False,
 ) -> list[str]:
     """Reject writes outside the current stage's artifact boundary."""
     if not baseline:
@@ -381,7 +936,26 @@ def stage_scope_errors(
         for path in set(baseline) | set(current)
         if baseline.get(path) != current.get(path)
     }
-    if stage == "planning":
+    if stage == "inventory":
+        allowed = (
+            f"planning/inventory/v{planning_version}/",
+            f"reports/PROBLEM_INVENTORY_v{planning_version}.md",
+        )
+    elif stage == "inventory_audit" or stage.startswith("method_audit:"):
+        allowed = ()
+    elif stage.startswith("method:"):
+        problem_id = stage.split(":", 1)[1]
+        allowed = (
+            f"planning/methods/{problem_id}/v{planning_version}/method_card.json",
+            f"reports/{problem_id}_METHOD_v{planning_version}.md",
+        )
+    elif stage.startswith("spike:"):
+        problem_id = stage.split(":", 1)[1]
+        suffix = "/supplemental/" if supplemental_spike else "/"
+        allowed = (
+            f"planning/methods/{problem_id}/v{planning_version}/spike{suffix}",
+        )
+    elif stage == "planning":
         allowed = ("execution_plan.json", "reports/ANALYSIS_MODELING_REPORT.md")
     elif stage.startswith("problem:"):
         problem_id = stage.split(":", 1)[1]
@@ -410,6 +984,135 @@ def stage_scope_errors(
         path for path in changed if not any(path.startswith(prefix) for prefix in allowed)
     )
     return [f"artifact_changed: stage wrote outside its boundary: {path}" for path in disallowed]
+
+
+def inventory_prompt(
+    *, problem_file: str, version: int, competition: str, language: str, notes: str
+) -> str:
+    return f"""You are the problem-inventory maker. Read {problem_file}, input_manifest.json, relevant input files, and the modeling norms. Do not design algorithms, run computations, write execution_plan.json, or begin a solution.
+
+Write only planning/inventory/v{version}/problem_inventory.json and reports/PROBLEM_INVENTORY_v{version}.md. The JSON has exactly schema_version=1 and an ordered non-empty problems array. Each problem has exactly id, label, depends_on, requested_outputs, input_paths, interpretation, ambiguities, and suggested_evidence_level. requested_outputs is a non-empty list of {{id,statement}} copied from the task; use globally unique stable IDs. Dependencies must reference earlier problem IDs. input_paths may contain only existing input/ paths or input_manifest.json. ambiguities is a list of {{id,interpretations,impact,resolution_needed}}. suggested_evidence_level is A_certified, B_bounded_numerical, or C_exploratory and is advisory only. Do not hide a requested output inside interpretation or add speculative outputs.
+
+Competition: {competition}. Paper language: {language}. User notes: {notes or 'None'}. Stop after both inventory artifacts exist."""
+
+
+def inventory_audit_prompt(inventory: dict[str, Any]) -> str:
+    contract = _review_json_contract("inventory", "")
+    payload = json.dumps(inventory, ensure_ascii=False, indent=2)
+    return f"""Act as the read-only independent problem-inventory auditor. Re-read the original problem and inputs and check exact problem decomposition, requested-output coverage, dependency order, input boundaries, interpretations, and surfaced ambiguities. Do not design methods, edit/create files, or run computation.
+
+Inventory:
+{payload}
+
+Return only strict JSON with null problem_id matching this shape. Treat implementation_fidelity as inventory fidelity:
+{contract}"""
+
+
+def inventory_revision_prompt(review: dict[str, Any], version: int) -> str:
+    payload = json.dumps(review, ensure_ascii=False, indent=2)
+    return f"""Revise only the rejected problem inventory. Write a new append-only version at planning/inventory/v{version}/problem_inventory.json and reports/PROBLEM_INVENTORY_v{version}.md. Do not alter prior versions, design methods, write execution_plan.json, or run computation. Resolve every audit issue while preserving exact task outputs and honest ambiguities.
+
+Audit:
+{payload}"""
+
+
+def method_proposal_prompt(
+    inventory: dict[str, Any], problem_id: str, version: int, inventory_sha256: str
+) -> str:
+    inventory_problem = next(item for item in inventory["problems"] if item["id"] == problem_id)
+    payload = json.dumps(inventory_problem, ensure_ascii=False, indent=2)
+    return f"""Design one method card for {problem_id} only. Read the original inputs, accepted dependency artifacts, modeling norms, figure catalog, and this accepted inventory entry:
+{payload}
+
+Write only planning/methods/{problem_id}/v{version}/method_card.json and reports/{problem_id}_METHOD_v{version}.md. Do not write execution_plan.json, Spike code, formal result artifacts, or later methods. The JSON must have exactly schema_version=1, inventory_sha256='{inventory_sha256}', proposal_version={version}, problem_id='{problem_id}', problem, finite_domain, witness_strategy, gap_or_tail_exclusion, cost_model, and spike_spec.
+
+problem is one complete schema-v2 execution-plan problem object. Its requested_outputs statements must exactly match the inventory. Every claim adds evidence_level, requested_output_ids, and limitations (non-empty for Level B/C). Every requested-output ID needs at least one A_certified or B_bounded_numerical claim; C_exploratory is supplementary only. Every failure_semantics entry adds stable id, stable event_id, and category (`domain_event`, `mathematical_infeasibility`, `numerical_failure`, `data_or_input_failure`, or `decision_outcome`); all conditions describing the same physical event must share event_id and category. State finite domains, witnesses/brackets, gap/tail exclusion, mutually exclusive failure semantics, independent validation, figure specs, and a realistic runtime limit. cost_model has exactly operation, estimated_operations, estimated_seconds, memory_mb, scaling. spike_spec has exactly questions, representative_cases, required_metrics and required_witnesses; each list entry is {{id,description}}, IDs are globally unique, and only required_witnesses may be empty. Prefer the cheapest scientifically honest evidence; never invent an unaffordable formal certificate. Stop after the two method artifacts."""
+
+
+def method_revision_prompt(
+    inventory: dict[str, Any], problem_id: str, version: int, review: dict[str, Any]
+) -> str:
+    base = method_proposal_prompt(
+        inventory, problem_id, version, canonical_hash(inventory)
+    )
+    evidence = json.dumps(review, ensure_ascii=False, indent=2)
+    return f"""{base}
+
+This is a targeted revision. Read the immediately preceding immutable proposal version under planning/methods/{problem_id}/ before writing v{version}. Resolve every item below without changing the accepted inventory or upstream artifacts. Do not strengthen evidence beyond what is applicable and affordable.
+
+Method audit evidence:
+{evidence}"""
+
+
+def evidence_downgrade_prompt(
+    inventory: dict[str, Any], problem_id: str, version: int, review: dict[str, Any]
+) -> str:
+    base = method_revision_prompt(inventory, problem_id, version, review)
+    return f"""{base}
+
+This final revision is downgrade-only. Change only Reviewer-listed A_certified claims to B_bounded_numerical and update their statement, evidence, acceptance criterion, uncertainty, and limitations honestly. Requested-output scope, method-spec fields, dependencies, outputs, validation, failure semantics, independent validation, and figures may not change. Do not introduce C_exploratory coverage."""
+
+
+def spike_prompt(
+    card: dict[str, Any],
+    *,
+    supplemental: bool = False,
+    supplemental_ids: list[str] | None = None,
+) -> str:
+    problem_id = card["problem_id"]
+    version = card["proposal_version"]
+    suffix = "/supplemental" if supplemental else ""
+    budget = 60 if supplemental else spike_budget(card["problem"]["runtime_limit_seconds"])
+    payload = json.dumps(card, ensure_ascii=False, indent=2)
+    target_note = (
+        f" For this supplemental Spike, cover exactly these planned IDs: {supplemental_ids}."
+        if supplemental
+        else " Cover every planned Spike ID exactly once."
+    )
+    return f"""Run one {'supplemental ' if supplemental else ''}feasibility Spike for {problem_id}. This is planning evidence, not a formal solution. Read only input/, input_manifest.json, accepted dependency artifacts, and this method card:
+{payload}
+
+Write only planning/methods/{problem_id}/v{version}/spike{suffix}/. Put executable probe code in probe.py and strict data in spike_report.json. The total declared runtime budget is at most {budget} seconds. Do not write code/, results/, figures/, reports/, execution_plan.json, or accepted artifacts. Benchmark representative kernel operations and produce required witnesses/brackets when requested; do not run the full solution.
+
+spike_report.json has exactly schema_version=1, status='candidate', problem_id, method_spec_sha256='{card['method_spec_sha256']}', budget_seconds, actual_runtime_seconds, answered_question_ids, probe_scope, benchmarks, estimated_full_runtime_seconds, peak_memory_mb, witnesses, unresolved_risks, and artifact_paths. answered_question_ids and probe_scope contain planned question/case IDs. Each benchmark adds metric_id to name, operations, seconds, throughput, unit; each witness adds witness_id to type, summary, artifact_paths.{target_note} Every artifact, including probe.py and witness files, must be listed and stay inside this Spike directory. Timeout or process failure is numerical/planning feasibility evidence, never mathematical infeasibility or a domain event. Stop after writing the candidate report."""
+
+
+def method_audit_prompt(
+    inventory_problem: dict[str, Any], card: dict[str, Any], spike: dict[str, Any]
+) -> str:
+    contract = json.dumps({
+        "schema_version": 1,
+        "review_type": "method",
+        "problem_id": card["problem_id"],
+        "verdict": "accept | revise | blocked",
+        "statement_alignment": "pass | fail",
+        "method_validity": "pass | fail",
+        "computational_feasibility": "pass | fail",
+        "evidence_calibration": "pass | fail",
+        "validation_independence": "pass | fail",
+        "dependency_consistency": "pass | fail",
+        "figure_contract": "pass | fail",
+        "issue_class": "none | method | ambiguity | evidence | budget | blocked",
+        "issues": [],
+        "required_repairs": [],
+        "supplemental_spike": False,
+        "supplemental_spike_ids": [],
+        "allowed_downgrades": [],
+    }, ensure_ascii=False, indent=2)
+    payload = json.dumps({
+        "inventory": inventory_problem,
+        "method_card": card,
+        "spike_report": spike,
+    }, ensure_ascii=False, indent=2)
+    return f"""Act as the independent read-only Method Auditor. Re-read the original inputs, accepted dependencies, modeling norms, and the package below. Do not edit/create files or run expensive computation.
+
+Check statement alignment, mathematical applicability, real Spike-based computational feasibility, declared evidence level, independent validation, dependency consistency, and figure semantics. Prefer the cheapest scientifically honest evidence. Do not demand formal proof for a bounded numerical modeling answer; reject proof inflation, unbounded searches, missing event witnesses, conflicting failure meanings, unaffordable operation counts, or validations equivalent to the primary method. A timeout is not mathematical infeasibility. Request supplemental_spike only for one specific unresolved measurement and list exactly its existing planned IDs in supplemental_spike_ids; otherwise use false and []. allowed_downgrades may contain only {{claim_id,from:'A_certified',to:'B_bounded_numerical',reason}}.
+
+Package:
+{payload}
+
+Return only strict JSON matching:
+{contract}"""
 
 
 def planning_prompt(*, problem_file: str, competition: str, language: str, paper_engine: str, notes: str) -> str:
