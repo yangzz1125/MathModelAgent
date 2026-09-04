@@ -109,6 +109,7 @@ RPC_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 MAX_VERIFY_REPAIRS = 2
 MAX_SPIKE_REPAIRS = 2
 MAX_LOCAL_ARTIFACT_REPAIRS = 2
+MAX_CANDIDATE_REPAIRS = 2
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 SCAFFOLD_DIRS = ("reports", "code", "results", "figures", "paper", "planning")
@@ -2622,6 +2623,7 @@ class TaskRuntime:
                 )
                 return
             phase["attempts"] = int(phase.get("attempts") or 1) + 1
+            phase.pop("candidate_repair_attempts", None)
             phase["review_status"] = "repairing"
             workflow["mode"] = "scientific_repair"
             workflow["stage_snapshot"] = workspace_hashes(self.workspace)
@@ -2645,10 +2647,20 @@ class TaskRuntime:
         project = self._project()
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
-        if not phase or int(phase.get("attempts") or 1) >= 3:
+        if not phase:
             await self._wait_with_errors(errors)
             return
-        phase["attempts"] = int(phase.get("attempts") or 1) + 1
+        if workflow.get("contract_version") == 3:
+            repairs = int(phase.get("candidate_repair_attempts") or 0)
+            if repairs >= MAX_CANDIDATE_REPAIRS:
+                await self._wait_with_errors(errors)
+                return
+            phase["candidate_repair_attempts"] = repairs + 1
+        else:
+            if int(phase.get("attempts") or 1) >= 3:
+                await self._wait_with_errors(errors)
+                return
+            phase["attempts"] = int(phase.get("attempts") or 1) + 1
         phase["last_error"] = "; ".join(errors)[:2000]
         workflow["mode"] = "candidate_repair"
         self._save_project(project)

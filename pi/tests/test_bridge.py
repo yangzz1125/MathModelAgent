@@ -2776,6 +2776,27 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(workflow["phases"][2]["attempts"], 2)
             runtime._switch_session.assert_awaited_once_with("worker")
 
+    async def test_v3_candidate_repairs_do_not_consume_scientific_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            project = runtime._project()
+            project["workflow"]["contract_version"] = 3
+            runtime._save_project(project)
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+
+            error = ["figure_protocol: provenance mismatch"]
+            await runtime._repair_candidate_v2(error)
+            await runtime._repair_candidate_v2(error)
+
+            phase = runtime._project()["workflow"]["phases"][2]
+            self.assertEqual(phase["attempts"], 1)
+            self.assertEqual(phase["candidate_repair_attempts"], 2)
+            self.assertEqual(runtime.prompt.await_count, 2)
+
+            await runtime._repair_candidate_v2(error)
+            self.assertEqual(runtime.status, "failed")
+
     async def test_scientific_reviewer_write_fails_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._workspace(directory, at_problem=True)
