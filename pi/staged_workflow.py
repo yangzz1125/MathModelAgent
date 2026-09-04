@@ -1256,8 +1256,22 @@ Review evidence:
 {evidence}"""
 
 
-def paper_planning_prompt(plan_version: int) -> str:
-    return f"""Act as the scientific paper content planner only. Read execution_plan.json plan_version {plan_version}, every accepted scientific review, frozen result/report/figure artifact, each accepted `verification.json.figures` provenance entry, and $MATHMODELAGENT_ROOT/skills/5writing/SKILL.md. Do not write paper source or modify accepted artifacts.
+def _evidence_scope(paths: list[str] | None) -> str:
+    items = "\n".join(f"- {path}" for path in (paths or []))
+    return f"""Read only the following workspace evidence files; the Host assembled this complete allowlist from accepted lineage:
+{items or '- None'}
+
+Do not inspect $MATHMODELAGENT_ROOT/pi/, tests/, other workspaces, superseded Method/Spike versions, validator implementations, or repository history. Do not use shell/search tools to discover additional context. Missing information must be reported rather than recovered from unlisted files."""
+
+
+def paper_planning_prompt(
+    plan_version: int, evidence_paths: list[str] | None = None
+) -> str:
+    scope = _evidence_scope(evidence_paths)
+    return f"""Act as the scientific paper content planner only. Use this Host-owned evidence scope:
+{scope}
+
+The active execution plan version is {plan_version}. Do not write paper source or modify accepted artifacts.
 
 Write paper_plan.json and reports/PAPER_PLAN.md. paper_plan.json uses schema_version=1, the active plan_version, an advisory recommended_page_range [min,max], and coverage with exactly one entry per accepted claim. Each coverage entry requires claim_id, problem_id, section_id, interpretation_and_assumptions, non-empty model_or_equations, algorithm_and_stopping, non-empty frozen result_evidence and validation_evidence paths, sensitivity_or_robustness, approximation_ids, non-empty limitations, figures, and citations_needed. Every claim must state its applicability boundary or limitation; every declared approximation must also be disclosed there. Page range is advisory, but choose it proportionally to problem complexity and avoid duplicate sections or padding. Scientific content coverage is mandatory. Stop before writing the paper."""
 
@@ -1328,11 +1342,22 @@ def writing_repair_prompt(errors: list[str], repair_number: int = 1) -> str:
 Fix every item under the report's hard-error and required-repairs sections, including truthful manifest anchors. Preserve accepted numbers. For each visual defect, edit the source, compile twice, render the exact failed PDF page at at least 160 DPI, inspect the resulting image, and iterate within this repair turn until all cited labels, axes, legends, tables, and margins are visibly separated and unclipped. Use the paper language for chart prose. Confirm all manifest anchors are unique, semantically correct literal substrings before stopping. Confirm every explicit bibliography item is cited in the body and every citation resolves. Remove duplicate contents pages, consecutive forced page breaks, and forced separation before a short reference list. Use TEST as a neutral control number only when the problem supplied none. Do not run verification or write VERIFY_REPORT.md yourself."""
 
 
-def final_stage_prompt(stage: str, *, competition: str, language: str, paper_engine: str) -> str:
+def final_stage_prompt(
+    stage: str,
+    *,
+    competition: str,
+    language: str,
+    paper_engine: str,
+    evidence_paths: list[str] | None = None,
+) -> str:
     if stage == "diagram":
         return """Fully read $MATHMODELAGENT_ROOT/skills/4drawio/SKILL.md. Read only accepted reports/results and paper_plan.json. Create only conceptual diagrams that add scientific information and are explicitly useful to the paper; do not generate generic roadmaps, decorative architecture diagrams, or duplicate a data figure. Always write reports/DRAWIO_REPORT.md; if no conceptual diagram is needed, explain that there. Do not modify code or accepted results. Stop after this stage."""
     if stage == "writing":
-        return f"""Fully read $MATHMODELAGENT_ROOT/skills/5writing/SKILL.md, paper_plan.json, reports/PAPER_PLAN.md, execution_plan.json, all accepted scientific reviews, frozen evidence, and accepted `verification.json.figures` entries. Write the complete {language} {competition} paper using {paper_engine}. Cover every paper-plan claim with its model/equations, algorithm and stopping rule, result evidence, independent validation, sensitivity/robustness, conclusion, and disclosed limitations. Use only accepted frozen evidence for numerical claims; do not recompute, invent values, redraw data, pad length, or omit evidence because a section is short.
+        scope = _evidence_scope(evidence_paths)
+        return f"""Fully read $MATHMODELAGENT_ROOT/skills/5writing/SKILL.md and use this Host-owned evidence scope:
+{scope}
+
+Write the complete {language} {competition} paper using {paper_engine}. Cover every paper-plan claim with its model/equations, algorithm and stopping rule, result evidence, independent validation, sensitivity/robustness, conclusion, and disclosed limitations. Use only accepted frozen evidence for numerical claims; do not recompute, invent values, redraw data, pad length, or omit evidence because a section is short. Shell commands are for compiling, rendering, and validating the paper only, never repository discovery.
 
 Fully cover every claim, but keep the paper proportional to the problem. Treat recommended_page_range as soft guidance: remove repeated claim-template prose, duplicate contents pages, unnecessary forced page breaks, oversized spacing, excessive precision, and unused diagrams before adding pages. Keep exactly one table of contents. Let a short reference list follow the body naturally instead of forcing it onto a new page. Keep enough derivation and evidence to make each conclusion auditable.
 

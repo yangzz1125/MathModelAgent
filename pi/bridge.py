@@ -1552,6 +1552,51 @@ class TaskRuntime:
         problem_id = current.split(":", 1)[1]
         return next((item for item in plan["problems"] if item["id"] == problem_id), None)
 
+    def _paper_context_paths(
+        self, project: dict[str, Any], *, writing: bool
+    ) -> list[str]:
+        """List accepted workspace evidence without copying or rediscovering it."""
+        workflow = project["workflow"]
+        paths = {
+            str(project.get("problem_file") or ""),
+            "input_manifest.json",
+            "execution_plan.json",
+            "reports/ANALYSIS_MODELING_REPORT.md",
+            "reports/PLAN_COMPLETENESS.json",
+        }
+        try:
+            plan = validate_execution_plan(self.workspace)
+            for problem in plan["problems"]:
+                paths.add(f"reports/{problem['id']}_SCIENTIFIC_REVIEW.json")
+                paths.update(
+                    path
+                    for path in problem["inputs"]
+                    if Path(path).suffix.lower() in PROBLEM_SUFFIXES
+                )
+        except ContractError:
+            pass
+        for artifacts in (workflow.get("frozen") or {}).values():
+            if isinstance(artifacts, dict):
+                paths.update(str(path) for path in artifacts)
+        if writing:
+            paths.update({
+                "paper_plan.json",
+                "reports/PAPER_PLAN.md",
+                "reports/DRAWIO_REPORT.md",
+            })
+            figure_root = self.workspace / "figures"
+            if figure_root.is_dir():
+                paths.update(
+                    path.relative_to(self.workspace).as_posix()
+                    for path in figure_root.rglob("*")
+                    if path.is_file()
+                )
+        return sorted(
+            path
+            for path in paths
+            if path and (self.workspace / path).is_file()
+        )
+
     def _current_runtime_limit(self) -> int | None:
         try:
             workflow = self._project().get("workflow") or {}
@@ -1627,7 +1672,10 @@ class TaskRuntime:
             return plan_audit_prompt()
         if stage == "paper_planning":
             plan = validate_execution_plan(self.workspace)
-            return paper_planning_prompt(int(plan.get("plan_version") or 1))
+            return paper_planning_prompt(
+                int(plan.get("plan_version") or 1),
+                self._paper_context_paths(project, writing=False),
+            )
         problem = self._problem(workflow)
         if problem:
             return problem_prompt(problem)
@@ -1636,6 +1684,11 @@ class TaskRuntime:
             competition=str(project.get("competition") or "CUMCM"),
             language=str(project.get("language") or "Chinese"),
             paper_engine=str(project.get("paper_engine") or "LaTeX"),
+            evidence_paths=(
+                self._paper_context_paths(project, writing=True)
+                if stage == "writing"
+                else None
+            ),
         )
 
     def _v3_mode_for_stage(self, stage: str) -> str:

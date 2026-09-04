@@ -2179,6 +2179,48 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Document Reviewer modified", saved["workflow"]["phases"][-1]["last_error"])
             self.assertFalse((runtime.workspace / "reports" / "VERIFY_REPORT.md").exists())
 
+    async def test_paper_context_uses_host_allowlist_without_old_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            self._candidate(runtime)
+            (runtime.workspace / "reports" / "q1_SCIENTIFIC_REVIEW.json").write_text(
+                self._review(), encoding="utf-8"
+            )
+            figure = runtime.workspace / "figures" / "q1" / "chart.pdf"
+            figure.parent.mkdir(parents=True)
+            figure.write_bytes(b"pdf")
+            old_method = runtime.workspace / "planning" / "methods" / "q1" / "v1" / "method_card.json"
+            old_method.parent.mkdir(parents=True)
+            old_method.write_text("{}", encoding="utf-8")
+            project = runtime._project()
+            frozen = artifact_hashes(runtime.workspace, "q1")
+            frozen["figures/q1/chart.pdf"] = hashlib.sha256(figure.read_bytes()).hexdigest()
+            project["workflow"]["frozen"] = {"q1": frozen}
+            self._paper_plan(runtime)
+            (runtime.workspace / "reports" / "DRAWIO_REPORT.md").write_text("diagram")
+            runtime._save_project(project)
+
+            planner_paths = runtime._paper_context_paths(project, writing=False)
+            writer_paths = runtime._paper_context_paths(project, writing=True)
+
+            self.assertIn("results/q1/result.json", planner_paths)
+            self.assertIn("figures/q1/chart.pdf", planner_paths)
+            self.assertNotIn("planning/methods/q1/v1/method_card.json", planner_paths)
+            self.assertNotIn("paper_plan.json", planner_paths)
+            self.assertIn("paper_plan.json", writer_paths)
+            self.assertIn("reports/DRAWIO_REPORT.md", writer_paths)
+            project["workflow"].update({"current": "paper_planning", "mode": "run"})
+            planner_prompt = runtime._prompt_for_current(project)
+            self.assertIn("Host assembled this complete allowlist", planner_prompt)
+            self.assertIn("results/q1/result.json", planner_prompt)
+            self.assertNotIn("planning/methods/q1/v1", planner_prompt)
+            self.assertNotIn("skills/5writing/SKILL.md", planner_prompt)
+            project["workflow"]["current"] = "writing"
+            writer_prompt = runtime._prompt_for_current(project)
+            self.assertIn("skills/5writing/SKILL.md", writer_prompt)
+            self.assertIn("paper_plan.json", writer_prompt)
+            self.assertIn("never repository discovery", writer_prompt)
+
     async def test_paper_planning_gate_advances_to_diagram(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._workspace(directory, at_problem=True)

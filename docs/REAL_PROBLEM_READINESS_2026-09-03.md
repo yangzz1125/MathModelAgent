@@ -27,7 +27,7 @@
 
 1. 新任务使用 contract-v3；Problem Inventory、Method Card、Spike 和 Method Audit 全部按问题/版本持久化，旧版本不覆盖。
 2. Reviewer Pi session（含最终 Document Reviewer）只激活 `read/grep/find/ls`；`bash/powershell/edit/write` 与 extension tools 从模型工具集合中移除，Host transaction marker 另有签名防篡改。Document Reviewer 只返回严格 JSON，Host 复核后生成 `reports/VERIFY_REPORT.md`；一次 JSON 协议错误只读重试，不触发论文修复。
-3. 方法规划与正式执行逐问题交错；下游 Spike 可以读取已科学接受的上游代码和结果。
+3. 方法规划与正式执行逐问题交错；下游 Spike 可以读取已科学接受的上游代码和结果。Paper Planning/ Writing 由 Host 提供 accepted evidence 精确路径白名单，不再搜索 `pi/`、tests、其他 workspace、历史 Git 或旧 Method/Spike 版本；Writing 的 shell 只用于论文编译、渲染和校验。
 4. evidence level 固定为 `A_certified`、`B_bounded_numerical`、`C_exploratory`；Level C 不能覆盖题面 requested output。
 5. 主 Spike 预算为正式问题预算的 10%，下限 20 秒、上限 120 秒；最多一次 60 秒补充探针，累计 bash 时间跨暂停持久化。Host 校验或预算错误最多进行两次同 Method 版本局部修复，不消耗 Method revision；耗尽即失败，越界写入或冻结证据变化立即失败。
 6. Method Audit 初稿加最多两次普通定向修订；耗尽后默认失败，仅保留一次 Reviewer 明确授权、Host 校验的 A→B 校准。
