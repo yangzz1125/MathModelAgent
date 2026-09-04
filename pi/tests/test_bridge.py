@@ -1295,6 +1295,63 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(failed_spike["local_repair_attempts"], 2)
             self.assertIn("spike_repair_exhausted", failed_spike["last_error"])
 
+    async def test_inventory_and_method_protocol_retries_keep_read_only_session(self) -> None:
+        for stage, mode, phase_index in (
+            ("inventory_audit", "inventory_audit", 1),
+            ("method_audit:q1", "method_audit", 4),
+        ):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                runtime = self._runtime_at_method_audit(directory)
+                project = runtime._project()
+                workflow = project["workflow"]
+                workflow.update({"current": stage, "mode": mode})
+                phase = workflow["phases"][phase_index]
+                phase.update({"status": "running", "attempts": 1})
+                workflow["review_snapshot"] = workspace_hashes(runtime.workspace)
+                workflow.pop("pending_transition", None)
+                runtime._save_project(project)
+                runtime._last_assistant_text = "not json"
+
+                await runtime._settled()
+
+                saved = runtime._project()["workflow"]
+                saved_phase = saved["phases"][phase_index]
+                self.assertEqual(saved_phase["attempts"], 1)
+                self.assertEqual(saved_phase["protocol_attempts"], 1)
+                runtime._switch_session.assert_not_awaited()
+                runtime.prompt.assert_awaited_once()
+                self.assertIn(
+                    "previous response failed the strict JSON protocol",
+                    runtime.prompt.await_args.args[0],
+                )
+                resumed = runtime._resume_prompt(runtime._project())
+                self.assertIn("previous response failed the strict JSON protocol", resumed)
+
+    async def test_inventory_audit_protocol_exhaustion_fails_without_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow.update({"current": "inventory_audit", "mode": "inventory_audit"})
+            phase = workflow["phases"][1]
+            phase.update({"status": "running", "attempts": 1})
+            workflow["review_snapshot"] = workspace_hashes(runtime.workspace)
+            workflow.pop("pending_transition", None)
+            runtime._save_project(project)
+            runtime._last_assistant_text = "not json"
+
+            await runtime._settled()
+            await runtime._settled()
+
+            failed = runtime._project()
+            failed_phase = failed["workflow"]["phases"][1]
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed_phase["attempts"], 1)
+            self.assertEqual(failed_phase["protocol_attempts"], 2)
+            self.assertEqual(failed["workflow"]["inventory_version"], 1)
+            self.assertEqual(runtime._ledger()["inventory"]["version"], 1)
+            runtime._switch_session.assert_not_awaited()
+
     async def test_inventory_audit_pending_transition_replays_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = self._workspace(directory)
@@ -2091,6 +2148,71 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             }],
         }))
         (runtime.workspace / "reports" / "PAPER_PLAN.md").write_text("coverage")
+
+    async def test_plan_audit_protocol_retry_keeps_attempt_and_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory)
+            runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            await runtime._settled()
+            runtime._switch_session.reset_mock()
+            runtime.prompt.reset_mock()
+            runtime._last_assistant_text = "not json"
+
+            await runtime._settled()
+
+            workflow = runtime._project()["workflow"]
+            phase = next(item for item in workflow["phases"] if item["id"] == "plan_audit")
+            self.assertEqual(phase["attempts"], 1)
+            self.assertEqual(phase["protocol_attempts"], 1)
+            runtime._switch_session.assert_not_awaited()
+            self.assertIn(
+                "previous response failed the strict JSON protocol",
+                runtime.prompt.await_args.args[0],
+            )
+
+    async def test_scientific_protocol_retry_preserves_review_attempt_and_resume_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            self._candidate(runtime)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["mode"] = "scientific_review"
+            phase = runtime._current_phase(workflow)
+            assert phase is not None
+            phase["review_attempts"] = 1
+            workflow["review_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            runtime._last_assistant_text = "not json"
+
+            await runtime._settled()
+
+            saved = runtime._project()
+            saved_phase = runtime._current_phase(saved["workflow"])
+            assert saved_phase is not None
+            self.assertEqual(saved_phase["review_attempts"], 1)
+            self.assertEqual(saved_phase["protocol_attempts"], 1)
+            runtime._switch_session.assert_not_awaited()
+            self.assertIn(
+                "previous response failed the strict JSON protocol",
+                runtime.prompt.await_args.args[0],
+            )
+            self.assertIn(
+                "previous response failed the strict JSON protocol",
+                runtime._resume_prompt(saved),
+            )
+
+            runtime._last_assistant_text = self._review()
+            await runtime._settled()
+            accepted_workflow = runtime._project()["workflow"]
+            accepted_phase = next(
+                item for item in accepted_workflow["phases"] if item["id"] == "problem:q1"
+            )
+            self.assertEqual(accepted_phase["protocol_attempts"], 0)
 
     async def test_pause_persists_without_consuming_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

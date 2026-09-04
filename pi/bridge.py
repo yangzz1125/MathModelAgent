@@ -995,6 +995,51 @@ class TaskRuntime:
             return "planner"
         return "worker"
 
+    def _with_review_protocol_repair(
+        self, prompt: str, phase: dict[str, Any] | None
+    ) -> str:
+        if not phase or int(phase.get("protocol_attempts") or 0) < 1:
+            return prompt
+        error = str(phase.get("last_error") or "review_protocol: invalid strict JSON")
+        return (
+            prompt
+            + "\n\nYour previous response failed the strict JSON protocol: "
+            + error.removeprefix("review_protocol: ")
+            + ". Return one corrected JSON object only."
+        )
+
+    def _clear_review_protocol(self, phase: dict[str, Any] | None) -> None:
+        if not phase:
+            return
+        phase["protocol_attempts"] = 0
+        if str(phase.get("last_error") or "").startswith("review_protocol:"):
+            phase["last_error"] = ""
+
+    async def _retry_review_protocol(
+        self,
+        project: dict[str, Any],
+        error: ScientificContractError,
+        *,
+        label: str,
+    ) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        attempts = int((phase or {}).get("protocol_attempts") or 0) + 1
+        if phase:
+            phase["protocol_attempts"] = attempts
+            phase["last_error"] = f"review_protocol: {error}"
+        self._save_project(project)
+        if attempts >= 2:
+            await self._wait_with_errors([f"review_protocol: {error}"])
+            return
+        await self.system(f"{label} JSON 无效，Sol 正在原只读会话重试", "warning")
+        try:
+            await self.prompt(self._prompt_for_current(self._project()))
+        except Exception as exc:
+            await self._wait_with_errors([
+                f"rpc_error: {label} protocol retry failed: {exc}"
+            ])
+
     def _resume_prompt(self, project: dict[str, Any]) -> str:
         workflow = project["workflow"]
         stage = str(workflow.get("current") or "")
@@ -1028,7 +1073,10 @@ class TaskRuntime:
                 )
             return base
         if mode == "inventory_audit":
-            return inventory_audit_prompt(self._inventory(workflow), context_paths)
+            return self._with_review_protocol_repair(
+                inventory_audit_prompt(self._inventory(workflow), context_paths),
+                phase,
+            )
         if mode in {"method_proposal", "method_revision", "evidence_downgrade"}:
             problem_id = self._phase_problem_id(workflow)
             if problem_id:
@@ -1098,18 +1146,24 @@ class TaskRuntime:
                     item for item in self._inventory(workflow)["problems"]
                     if item["id"] == card["problem_id"]
                 )
-                return method_audit_prompt(
-                    inventory_problem, card, spike, context_paths
+                return self._with_review_protocol_repair(
+                    method_audit_prompt(inventory_problem, card, spike, context_paths),
+                    phase,
                 )
         if mode == "plan_audit":
-            return plan_audit_prompt(context_paths)
+            return self._with_review_protocol_repair(
+                plan_audit_prompt(context_paths), phase
+            )
         if mode == "plan_revision":
             return plan_revision_prompt(workflow.get("last_review") or {}, context_paths)
         if mode == "scientific_review" and problem:
-            return scientific_review_prompt(
-                problem,
-                context_paths,
-                self._figure_reference_context(problem),
+            return self._with_review_protocol_repair(
+                scientific_review_prompt(
+                    problem,
+                    context_paths,
+                    self._figure_reference_context(problem),
+                ),
+                phase,
             )
         if mode == "scientific_repair" and problem:
             return scientific_repair_prompt(
@@ -1861,7 +1915,7 @@ class TaskRuntime:
                 self._stage_context_paths(project),
                 self._figure_reference_context(problem),
             )
-        return final_stage_prompt(
+        prompt = final_stage_prompt(
             stage,
             competition=str(project.get("competition") or "CUMCM"),
             language=str(project.get("language") or "Chinese"),
@@ -1875,6 +1929,13 @@ class TaskRuntime:
                 if stage == "verify"
                 else None
             ),
+        )
+        return (
+            self._with_review_protocol_repair(
+                prompt, self._current_phase(workflow)
+            )
+            if stage == "verify"
+            else prompt
         )
 
     def _v3_mode_for_stage(self, stage: str) -> str:
@@ -2132,29 +2193,13 @@ class TaskRuntime:
         try:
             review = parse_document_review(self._last_assistant_text)
         except ScientificContractError as exc:
-            protocol_attempts = int((phase or {}).get("protocol_attempts") or 0) + 1
-            if phase:
-                phase["protocol_attempts"] = protocol_attempts
-                phase["last_error"] = f"review_protocol: {exc}"
-            if protocol_attempts < 2:
-                self._save_project(project)
-                await self.system("文档审查 JSON 无效，Sol 正在只读重试", "warning")
-                try:
-                    await self.prompt(
-                        self._prompt_for_current(project)
-                        + f"\n\nYour previous response failed the strict JSON protocol: {exc}. Return one corrected JSON object only."
-                    )
-                except Exception as retry_exc:
-                    await self._wait_with_errors([
-                        f"rpc_error: Document Reviewer protocol retry failed: {retry_exc}"
-                    ])
-            else:
-                self._save_project(project)
-                await self._wait_with_errors([f"review_protocol: {exc}"])
+            await self._retry_review_protocol(
+                project, exc, label="Document Review"
+            )
             return
 
+        self._clear_review_protocol(phase)
         if phase:
-            phase["protocol_attempts"] = 0
             phase["review_status"] = review["verdict"]
         workflow["document_review"] = review
         host_errors, _ = self._gate_current(project)
@@ -2358,11 +2403,9 @@ class TaskRuntime:
                 self._last_assistant_text, review_type="plan", problem_id=None
             )
         except ScientificContractError as exc:
-            if audit_phase and int(audit_phase.get("attempts") or 0) < 2:
-                await self._start_plan_audit(project, validate_execution_plan(self.workspace))
-            else:
-                await self._wait_with_errors([f"review_protocol: {exc}"])
+            await self._retry_review_protocol(project, exc, label="Plan Audit")
             return
+        self._clear_review_protocol(audit_phase)
         _write_json(self.workspace / "reports" / "PLAN_AUDIT.json", review)
         workflow["last_review"] = review
         if review["verdict"] == "accept":
@@ -2530,11 +2573,11 @@ class TaskRuntime:
                     problem_id=problem["id"],
                 )
             except ScientificContractError as exc:
-                if int(phase.get("review_attempts") or 0) < 3:
-                    await self._start_scientific_review(project, problem)
-                else:
-                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                await self._retry_review_protocol(
+                    project, exc, label="Scientific Review"
+                )
                 return
+            self._clear_review_protocol(phase)
             if workflow.get("contract_version") == 3:
                 self._authorize_transition(project, "scientific_review", review)
         _write_json(review_path, review)
@@ -2817,20 +2860,13 @@ class TaskRuntime:
                     self._last_assistant_text, review_type="inventory", problem_id=None
                 )
             except ScientificContractError as exc:
-                protocol_attempts = int((phase or {}).get("protocol_attempts") or 0) + 1
-                if phase:
-                    phase["protocol_attempts"] = protocol_attempts
-                if protocol_attempts < 2:
-                    self._save_project(project)
-                    await self._switch_session("planner")
-                    await self.prompt(self._prompt_for_current(self._project()))
-                else:
-                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                await self._retry_review_protocol(
+                    project, exc, label="Inventory Audit"
+                )
                 return
             self._authorize_transition(project, "inventory_audit", review)
         version = int(workflow.get("inventory_version") or 1)
-        if phase:
-            phase["protocol_attempts"] = 0
+        self._clear_review_protocol(phase)
         audit_path = inventory_path(self.workspace, version).with_name("audit.json")
         _write_json(audit_path, review)
         workflow["last_review"] = review
@@ -3132,14 +3168,9 @@ class TaskRuntime:
                     self._last_assistant_text, problem_id=card["problem_id"]
                 )
             except ScientificContractError as exc:
-                protocol_attempts = int(phase.get("protocol_attempts") or 0) + 1
-                phase["protocol_attempts"] = protocol_attempts
-                if protocol_attempts < 2:
-                    self._save_project(project)
-                    await self._switch_session("planner")
-                    await self.prompt(self._prompt_for_current(self._project()))
-                else:
-                    await self._wait_with_errors([f"review_protocol: {exc}"])
+                await self._retry_review_protocol(
+                    project, exc, label="Method Audit"
+                )
                 return
             all_spike_ids = {
                 item["id"]
@@ -3152,7 +3183,7 @@ class TaskRuntime:
                 ])
                 return
             self._authorize_transition(project, "method_audit", review)
-        phase["protocol_attempts"] = 0
+        self._clear_review_protocol(phase)
         audit_path = method_version_dir(
             self.workspace, card["problem_id"], card["proposal_version"]
         ) / f"audit_{int(phase.get('attempts') or 1)}.json"
