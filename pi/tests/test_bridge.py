@@ -61,6 +61,7 @@ from pi.staged_workflow import (
     result_errors,
     spike_budget,
     spike_prompt,
+    spike_repair_prompt,
     stage_scope_errors,
     validate_execution_plan,
     validate_method_card,
@@ -907,6 +908,16 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             report = validate_spike_report(workspace, card)
             self.assertEqual(report["status"], "candidate")
             self.assertEqual(report["budget_seconds"], 20)
+            del raw_report["actual_runtime_seconds"]
+            self._write(report_path, raw_report)
+            with self.assertRaisesRegex(
+                ContractError, "missing=\\['actual_runtime_seconds'\\], extra=\\[\\]"
+            ):
+                validate_spike_report(workspace, card)
+            repair_text = spike_repair_prompt(
+                card, ["validation_failed: spike report keys mismatch"]
+            )
+            self.assertIn("actual_runtime_seconds, answered_question_ids", repair_text)
 
     def test_level_c_cannot_cover_requested_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

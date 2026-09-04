@@ -411,8 +411,13 @@ def validate_spike_report(
         "estimated_full_runtime_seconds", "peak_memory_mb", "witnesses",
         "unresolved_risks", "artifact_paths",
     }
-    if set(raw) != required or raw.get("schema_version") != 1 or raw.get("status") != "candidate":
-        raise ContractError("spike report keys/schema/status mismatch")
+    if set(raw) != required:
+        raise ContractError(
+            "spike report keys mismatch; "
+            f"missing={sorted(required - set(raw))}, extra={sorted(set(raw) - required)}"
+        )
+    if raw.get("schema_version") != 1 or raw.get("status") != "candidate":
+        raise ContractError("spike report schema_version/status mismatch")
     if raw.get("problem_id") != card["problem_id"] or raw.get("method_spec_sha256") != card["method_spec_sha256"]:
         raise ContractError("spike report identity or method-spec hash mismatch")
     budget_value = raw.get("budget_seconds")
@@ -1267,7 +1272,7 @@ def spike_repair_prompt(
 Gate evidence:
 {details}
 
-Re-read the current probe.py, spike_report.json, witness files, and planning/methods/{problem_id}/v{version}/method_card.json. Correct the rejected schema, coverage, artifact declaration, or bounded probe evidence without changing measured values dishonestly. All bash calls and repairs share the original budget: use at most one bounded probe command, never TeX/LaTeX/PDF compilation, package installation, or network access, and force `text.usetex=False` after any plotting style. Write a structurally complete truthful checkpoint before optional slow work so another timeout does not remove the report. Reuse valid existing computation and rerun only the smallest missing check within the remaining budget. {target_note} A timeout or failed probe remains numerical/planning feasibility evidence, never mathematical infeasibility. Stop after the repaired Spike artifacts exist."""
+Re-read the current probe.py, spike_report.json, witness files, and planning/methods/{problem_id}/v{version}/method_card.json. spike_report.json must have exactly these top-level keys and no others: schema_version, status, problem_id, method_spec_sha256, budget_seconds, actual_runtime_seconds, answered_question_ids, probe_scope, benchmarks, estimated_full_runtime_seconds, peak_memory_mb, witnesses, unresolved_risks, artifact_paths. Correct the rejected schema, coverage, artifact declaration, or bounded probe evidence without changing measured values dishonestly. All bash calls and repairs share the original budget: use at most one bounded probe command, never TeX/LaTeX/PDF compilation, package installation, or network access, and force `text.usetex=False` after any plotting style. Write a structurally complete truthful checkpoint before optional slow work so another timeout does not remove the report. Reuse valid existing computation and rerun only the smallest missing check within the remaining budget. {target_note} A timeout or failed probe remains numerical/planning feasibility evidence, never mathematical infeasibility. Stop after the repaired Spike artifacts exist."""
 
 
 def method_audit_prompt(
