@@ -1080,6 +1080,24 @@ def method_proposal_prompt(
     inventory_problem = next(item for item in inventory["problems"] if item["id"] == problem_id)
     payload = json.dumps(inventory_problem, ensure_ascii=False, indent=2)
     scope = _evidence_scope(evidence_paths)
+    problem_shape = """{
+  "id": "problem id",
+  "label": "exact inventory label",
+  "depends_on": [],
+  "method": "one non-empty executable-method description",
+  "inputs": ["existing input/... paths, input_manifest.json, and declared accepted dependency paths only"],
+  "outputs": ["code/<id>/solve.py", "results/<id>/result.json", "reports/<id>_RESULTS.md"],
+  "validation": ["non-empty validation descriptions"],
+  "runtime_limit_seconds": 120,
+  "requested_outputs": ["exact inventory statements only"],
+  "interpretation": "one non-empty string",
+  "assumptions": [{"id":"...","statement":"...","rationale":"...","validation":"..."}],
+  "claims": [{"id":"...","type":"optimality","statement":"...","evidence_required":["..."],"acceptance":{"criterion":"...","tolerance":1e-9},"evidence_level":"A_certified","requested_output_ids":["..."],"limitations":[]}],
+  "approximations": [{"id":"...","original_quantity":"...","surrogate_quantity":"...","justification":"...","error_or_equivalence_check":"..."}],
+  "failure_semantics": [{"id":"...","event_id":"...","category":"numerical_failure","condition":"...","action":"..."}],
+  "independent_validation": [{"id":"...","method":"...","independent_from":"...","claims":["..."]}],
+  "figure_specs": []
+}"""
     return f"""Design one method card for {problem_id} only. Use this Host-owned evidence scope:
 {scope}
 
@@ -1088,7 +1106,17 @@ Read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md and $MATHMOD
 
 Write only planning/methods/{problem_id}/v{version}/method_card.json and reports/{problem_id}_METHOD_v{version}.md. Do not write execution_plan.json, Spike code, formal result artifacts, or later methods. The JSON must have exactly schema_version=1, inventory_sha256='{inventory_sha256}', proposal_version={version}, problem_id='{problem_id}', problem, finite_domain, witness_strategy, gap_or_tail_exclusion, cost_model, and spike_spec.
 
-problem is one complete schema-v2 execution-plan problem object. Its requested_outputs statements must exactly match the inventory. Every claim adds evidence_level, requested_output_ids, and limitations (non-empty for Level B/C). Every requested-output ID needs at least one A_certified or B_bounded_numerical claim; C_exploratory is supplementary only. Every failure_semantics entry adds stable id, stable event_id, and category (`domain_event`, `mathematical_infeasibility`, `numerical_failure`, `data_or_input_failure`, or `decision_outcome`); all conditions describing the same physical event must share event_id and category. State finite domains, witnesses/brackets, gap/tail exclusion, mutually exclusive failure semantics, independent validation, figure specs, and a realistic runtime limit. cost_model has exactly operation, estimated_operations, estimated_seconds, memory_mb, scaling. spike_spec has exactly questions, representative_cases, required_metrics and required_witnesses; each list entry is {{id,description}}, IDs are globally unique, and only required_witnesses may be empty. Prefer the cheapest scientifically honest evidence; never invent an unaffordable formal certificate. Stop after the two method artifacts."""
+`problem` must have exactly these top-level fields and no custom `schema_version`, `input_paths`, `model`, `deliverables`, or nested replacement objects:
+```json
+{problem_shape}
+```
+All `inputs` and `outputs` entries are literal relative path strings, never descriptions such as "candidate metrics". `outputs` must include at least one path under each of `code/{problem_id}/`, `results/{problem_id}/`, and the exact file `reports/{problem_id}_RESULTS.md`; figure artifacts use `figures/{problem_id}/`. Every future generated artifact named by the method must be declared as a path in `outputs`.
+
+Claim `type` is exactly one of `identity_or_constraint`, `feasibility`, `optimality`, `event_or_boundary`, `approximation`, `estimate_or_prediction`, `ranking_or_decision`, or `other`. Every claim adds evidence_level, requested_output_ids, and limitations (non-empty for Level B/C). Every requested-output ID needs at least one A_certified or B_bounded_numerical claim; C_exploratory is supplementary only. Every failure_semantics object has exactly id, event_id, category, condition, and action; category is `domain_event`, `mathematical_infeasibility`, `numerical_failure`, `data_or_input_failure`, or `decision_outcome`. Conditions describing the same physical event share event_id and category.
+
+If figures are required, every `figure_specs` object has exactly `id`, `claim_ids`, `purpose`, `plot_family`, `reference_id`, `panels`, `primary_encoding`, `secondary_encoding`, `required_annotations`, `final_width`, `vector_path`, `preview_path`, `generator_path`, `data_paths`, and `required_data_fields`. `generator_path` must be under `code/{problem_id}/`; vector/preview paths must be under `figures/{problem_id}/`; generated data paths must be under `results/{problem_id}/`; every generated path must also appear in `outputs`. Copy plot_family from the selected catalog reference.
+
+State finite domains, witnesses/brackets, gap/tail exclusion, mutually exclusive failure semantics, independent validation, figure specs, and a realistic runtime limit. cost_model has exactly operation, estimated_operations, estimated_seconds, memory_mb, scaling. spike_spec has exactly questions, representative_cases, required_metrics and required_witnesses; each list entry is {{id,description}}, IDs are globally unique, and only required_witnesses may be empty. Prefer the cheapest scientifically honest evidence; never invent an unaffordable formal certificate. Stop after the two method artifacts."""
 
 
 def method_revision_prompt(

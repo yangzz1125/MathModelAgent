@@ -779,6 +779,17 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertIn("not a filesystem access-control boundary", method_prompt)
             self.assertIn("results/q1/accepted.json", method_prompt)
             self.assertIn("figure-reference-catalog.json", method_prompt)
+            self.assertIn('"inputs": ["existing input/... paths', method_prompt)
+            self.assertIn('"outputs": ["code/<id>/solve.py"', method_prompt)
+            self.assertIn(
+                "All `inputs` and `outputs` entries are literal relative path strings",
+                method_prompt,
+            )
+            self.assertIn("must have exactly these top-level fields", method_prompt)
+            self.assertIn(
+                "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
+                method_prompt,
+            )
             self.assertIn("Do not inspect Host implementation", method_prompt)
 
             card = self._card(inventory)
