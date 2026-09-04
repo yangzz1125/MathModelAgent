@@ -1354,5 +1354,29 @@ Compile a non-empty PDF under paper/. Also write paper/paper_manifest.json with 
 }}
 Every anchor must occur exactly once in its section and all six anchors must be distinct. The limitation anchor must identify a real limitation, not a model or conclusion phrase, and must not contain or be contained by another anchor. Every explicit `\\bibitem{{key}}` must be cited by at least one body `\\cite{{key}}`, and no body citation may reference an absent key. Do not include uncited background references. The key is exactly `figures`, not `figure_paths`. Stop after the PDF, manifest, and rendered-page inspection are complete."""
     if stage == "verify":
-        return """Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md, paper_plan.json, paper/paper_manifest.json, and accepted `verification.json.figures` entries. This is Document Verification, not scientific re-acceptance. Confirm every accepted claim is substantively covered, all six manifest anchors per claim are unique and semantically truthful, frozen evidence and paper numbers agree, required models/results/independent validations/limitations are present, every listed reference is cited in the body and every citation resolves, compilation succeeds, and every PDF page is visually readable. For every paper figure, confirm the embedded source is the accepted frozen vector master, labels match the paper language, units/scales/legend remain readable at final size, grayscale distinctions survive, and no element overlaps or clips. Confirm there is exactly one contents sequence and that short references are not isolated by unnecessary forced page breaks. Short page count alone is only a warning; missing required scientific content is a hard failure. Do not modify accepted code/results or rewrite/redraw the paper. This stage may change only reports/VERIFY_REPORT.md and files under _tmp/. Never run a compiler from paper/ or direct compiler output into paper/. Treat the existing paper/main.log and readable paper/main.pdf as compilation evidence; if an isolated recompilation is necessary, copy the complete paper source tree into _tmp/, compile only there, and remove _tmp/ before stopping. If any hard check fails, write a `Required repairs` section with one concrete item per defect, including exact source file, physical PDF page, and affected text/element when available. Write reports/VERIFY_REPORT.md with an unambiguous standalone PASS conclusion only if every hard check passes, then stop."""
+        return """Act as the independent read-only Document Reviewer. Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md, paper_plan.json, paper/paper_manifest.json, accepted scientific reviews, frozen evidence, paper source, the existing compilation log, and every existing rendered PDF page. This current Host contract overrides any skill instruction to run commands or write a report: do not edit/create files, run compilation, render pages, or use shell commands.
+
+Confirm every accepted claim is substantively covered; all six manifest anchors per claim are unique and truthful; frozen evidence and paper numbers agree; required models, results, independent validations, sensitivity boundaries, conclusions, and limitations are present; every listed reference is cited and every citation resolves; the existing log/PDF establish successful compilation; and every rendered page is readable. For every figure, verify accepted provenance, paper-language labels, units, scales, legends, grayscale distinction, and absence of overlap or clipping. Confirm exactly one contents sequence and no unnecessary forced separation before a short reference list. Short page count alone is a warning, not a hard failure.
+
+Return only strict JSON with exactly this shape and no Markdown fences:
+{
+  "schema_version": 1,
+  "review_type": "document",
+  "problem_id": null,
+  "verdict": "accept | reject | blocked",
+  "claim_coverage": "pass | fail",
+  "manifest_anchors": "pass | fail",
+  "evidence_consistency": "pass | fail",
+  "references_and_figures": "pass | fail",
+  "compilation": "pass | fail",
+  "visual_readability": "pass | fail",
+  "document_structure": "pass | fail",
+  "issue_class": "none | content | manifest | evidence | compilation | visual | blocked",
+  "summary": "concise evidence-based summary",
+  "issues": [],
+  "required_repairs": [],
+  "warnings": []
+}
+
+Use verdict=accept only when all seven checks pass, issue_class=none, and issues/required_repairs are empty. For reject or blocked, provide at least one concrete issue and matching repair with the exact source file, physical PDF page, and affected text or element when available. The Host alone writes reports/VERIFY_REPORT.md and decides completion."""
     raise ValueError(f"unknown final stage: {stage}")

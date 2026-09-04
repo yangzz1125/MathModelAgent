@@ -31,9 +31,11 @@ from pi.figure_quality import figure_stack_errors
 from pi.scientific_review import (
     ScientificContractError,
     acceptance_chain_errors,
+    document_review_markdown,
     merge_plan_revision,
     paper_plan_frozen_errors,
     paper_source_errors,
+    parse_document_review,
     parse_method_review,
     parse_review,
     plan_completeness_receipt,
@@ -1569,7 +1571,9 @@ class TaskRuntime:
             return None
 
     def _reviewer_capability(self, workflow: dict[str, Any]) -> bool:
-        return str(workflow.get("mode") or "") in {
+        return str(workflow.get("current") or "") == "verify" or str(
+            workflow.get("mode") or ""
+        ) in {
             "review",
             "plan_audit",
             "scientific_review",
@@ -1676,6 +1680,8 @@ class TaskRuntime:
             stage == "inventory_audit" or stage.startswith("method_audit:")
         ):
             workflow["review_snapshot"] = workspace_hashes(self.workspace)
+        if stage == "verify" and workflow.get("contract_version") in {2, 3}:
+            workflow["review_snapshot"] = workspace_hashes(self.workspace)
         if phase:
             phase["status"] = "running"
             phase["attempts"] = max(1, int(phase.get("attempts") or 0))
@@ -1779,8 +1785,6 @@ class TaskRuntime:
                 except (ContractError, ScientificContractError) as exc:
                     errors.append(f"validation_failed: {exc}")
         elif stage == "verify":
-            report = self.workspace / "reports" / "VERIFY_REPORT.md"
-            text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
             if workflow.get("contract_version") in {2, 3}:
                 try:
                     active_plan = validate_execution_plan(self.workspace)
@@ -1793,8 +1797,11 @@ class TaskRuntime:
                     ))
                 except (ContractError, OSError, json.JSONDecodeError) as exc:
                     errors.append(f"scientific_acceptance: {exc}")
-            if not _verification_passed(text):
-                errors.append("validation_failed: reports/VERIFY_REPORT.md does not have an explicit PASS conclusion")
+            else:
+                report = self.workspace / "reports" / "VERIFY_REPORT.md"
+                text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
+                if not _verification_passed(text):
+                    errors.append("validation_failed: reports/VERIFY_REPORT.md does not have an explicit PASS conclusion")
             if not _paper_readable(self.workspace):
                 errors.append("validation_failed: paper PDF is missing, empty, or unreadable")
         return errors, plan
@@ -1873,6 +1880,63 @@ class TaskRuntime:
             await self.prompt(final_repair_prompt(problem))
         except Exception as exc:
             await self._wait_with_errors([f"rpc_error: final repair session failed: {exc}"])
+
+    async def _finish_document_review(self, project: dict[str, Any]) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        before = workflow.get("review_snapshot") or workflow.get("stage_snapshot") or {}
+        if workspace_hashes(self.workspace) != before:
+            await self._wait_with_errors([
+                "artifact_changed: Document Reviewer modified workspace files"
+            ])
+            return
+        try:
+            review = parse_document_review(self._last_assistant_text)
+        except ScientificContractError as exc:
+            protocol_attempts = int((phase or {}).get("protocol_attempts") or 0) + 1
+            if phase:
+                phase["protocol_attempts"] = protocol_attempts
+                phase["last_error"] = f"review_protocol: {exc}"
+            if protocol_attempts < 2:
+                self._save_project(project)
+                await self.system("文档审查 JSON 无效，Sol 正在只读重试", "warning")
+                try:
+                    await self.prompt(
+                        self._prompt_for_current(project)
+                        + f"\n\nYour previous response failed the strict JSON protocol: {exc}. Return one corrected JSON object only."
+                    )
+                except Exception as retry_exc:
+                    await self._wait_with_errors([
+                        f"rpc_error: Document Reviewer protocol retry failed: {retry_exc}"
+                    ])
+            else:
+                self._save_project(project)
+                await self._wait_with_errors([f"review_protocol: {exc}"])
+            return
+
+        if phase:
+            phase["protocol_attempts"] = 0
+            phase["review_status"] = review["verdict"]
+        workflow["document_review"] = review
+        host_errors, _ = self._gate_current(project)
+        report = document_review_markdown(review, host_errors)
+        (self.workspace / "reports" / "VERIFY_REPORT.md").write_text(
+            report, encoding="utf-8"
+        )
+        workflow.pop("review_snapshot", None)
+        self._save_project(project)
+        if host_errors:
+            await self._start_writing_repair(host_errors)
+            return
+        if review["verdict"] == "accept":
+            await self._complete_current(project, None)
+            return
+        errors = [
+            f"document_{review['issue_class']}: {issue}" for issue in review["issues"]
+        ] + [
+            f"required_repair: {repair}" for repair in review["required_repairs"]
+        ]
+        await self._start_writing_repair(errors)
 
     async def _start_writing_repair(self, errors: list[str]) -> None:
         project = self._project()
@@ -2906,6 +2970,9 @@ class TaskRuntime:
         if mode == "scientific_review":
             await self._finish_scientific_review(project)
             return
+        if stage == "verify":
+            await self._finish_document_review(project)
+            return
         errors, artifact = self._gate_current(project)
         if stage == "inventory":
             if errors:
@@ -2988,6 +3055,9 @@ class TaskRuntime:
             return
         if mode == "method_replan":
             await self._finish_method_replan(project)
+            return
+        if stage == "verify":
+            await self._finish_document_review(project)
             return
 
         errors, plan = self._gate_current(project)

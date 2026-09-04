@@ -37,9 +37,11 @@ from pi.scientific_review import (
     ScientificContractError,
     acceptance_chain_errors,
     candidate_errors,
+    document_review_markdown,
     merge_plan_revision,
     paper_plan_frozen_errors,
     paper_source_errors,
+    parse_document_review,
     parse_method_review,
     parse_review,
     plan_completeness_receipt,
@@ -139,6 +141,35 @@ class ScientificContractsTest(unittest.TestCase):
         accepted["verdict"] = "reject"
         with self.assertRaisesRegex(ScientificContractError, "requires issue_class"):
             parse_review(json.dumps(accepted), review_type="scientific", problem_id="q1")
+
+    def test_document_review_is_strict_and_host_renders_report(self) -> None:
+        review = {
+            "schema_version": 1,
+            "review_type": "document",
+            "problem_id": None,
+            "verdict": "accept",
+            "claim_coverage": "pass",
+            "manifest_anchors": "pass",
+            "evidence_consistency": "pass",
+            "references_and_figures": "pass",
+            "compilation": "pass",
+            "visual_readability": "pass",
+            "document_structure": "pass",
+            "issue_class": "none",
+            "summary": "All document checks passed against accepted evidence.",
+            "issues": [],
+            "required_repairs": [],
+            "warnings": ["The contents page is sparse."],
+        }
+        parsed = parse_document_review(json.dumps(review))
+        self.assertEqual(parsed["verdict"], "accept")
+        self.assertTrue(_verification_passed(document_review_markdown(parsed)))
+        self.assertFalse(_verification_passed(document_review_markdown(
+            parsed, ["validation_failed: paper PDF is unreadable"]
+        )))
+        review["visual_readability"] = "fail"
+        with self.assertRaisesRegex(ScientificContractError, "all-pass"):
+            parse_document_review(json.dumps(review))
 
     def test_acceptance_chain_requires_all_strict_accepts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -458,12 +489,13 @@ class StagedWorkflowContractTest(unittest.TestCase):
             self.assertTrue(any("results/q2/future.json" in error for error in errors))
             self.assertTrue(any("input/problem.md" in error for error in errors))
 
-    def test_verify_prompt_keeps_compilation_outside_paper_boundary(self) -> None:
+    def test_verify_prompt_requires_host_owned_read_only_json(self) -> None:
         prompt = final_stage_prompt(
             "verify", competition="MCM", language="English", paper_engine="LaTeX"
         )
-        self.assertIn("Never run a compiler from paper/", prompt)
-        self.assertIn("copy the complete paper source tree into _tmp/", prompt)
+        self.assertIn("do not edit/create files, run compilation", prompt)
+        self.assertIn("Return only strict JSON", prompt)
+        self.assertIn("Host alone writes reports/VERIFY_REPORT.md", prompt)
 
     def test_result_contract_and_frozen_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1780,6 +1812,29 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             "issues": [], "required_repairs": [],
         })
 
+    def _document_review(self, verdict: str = "accept") -> str:
+        accepted = verdict == "accept"
+        checks = {
+            name: "pass" if accepted else "fail"
+            for name in (
+                "claim_coverage", "manifest_anchors", "evidence_consistency",
+                "references_and_figures", "compilation", "visual_readability",
+                "document_structure",
+            )
+        }
+        return json.dumps({
+            "schema_version": 1,
+            "review_type": "document",
+            "problem_id": None,
+            "verdict": verdict,
+            **checks,
+            "issue_class": "none" if accepted else "visual",
+            "summary": "The paper and accepted evidence are consistent.",
+            "issues": [] if accepted else ["A table clips on physical PDF page 2."],
+            "required_repairs": [] if accepted else ["Fix paper/q1.tex table width."],
+            "warnings": [],
+        })
+
     def _paper_plan(self, runtime: TaskRuntime) -> None:
         (runtime.workspace / "paper_plan.json").write_text(json.dumps({
             "schema_version": 1, "plan_version": 1,
@@ -2018,18 +2073,111 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             (runtime.workspace / "paper" / "main.pdf").write_bytes(b"pdf")
             with patch.object(bridge, "_paper_readable", return_value=True):
                 await runtime._settled()
-                (runtime.workspace / "reports" / "VERIFY_REPORT.md").write_text(
-                    "Conclusion: PASS\n"
-                )
+                runtime._last_assistant_text = self._document_review()
                 await runtime._settled()
 
             project = runtime._project()
             self.assertEqual(project["status"], "completed")
+            self.assertEqual(project["workflow"]["document_review"]["verdict"], "accept")
+            self.assertTrue(_verification_passed(
+                (runtime.workspace / "reports" / "VERIFY_REPORT.md").read_text()
+            ))
             self.assertNotEqual(project["status"], "waiting")
             self.assertTrue(all(
                 phase["status"] == "completed" for phase in project["workflow"]["phases"]
             ))
             runtime.terminate.assert_awaited_once()
+
+    async def test_document_review_protocol_retries_without_writing_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "verify"
+            workflow["mode"] = "run"
+            verify = next(item for item in workflow["phases"] if item["id"] == "verify")
+            writing = next(item for item in workflow["phases"] if item["id"] == "writing")
+            verify.update({"status": "running", "attempts": 1})
+            snapshot = workspace_hashes(runtime.workspace)
+            workflow["stage_snapshot"] = snapshot
+            workflow["review_snapshot"] = snapshot
+            runtime._save_project(project)
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            runtime._last_assistant_text = "not json"
+            writing_attempts = writing["attempts"]
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            saved_verify = next(item for item in saved["phases"] if item["id"] == "verify")
+            saved_writing = next(item for item in saved["phases"] if item["id"] == "writing")
+            self.assertEqual(saved["current"], "verify")
+            self.assertEqual(saved_verify["protocol_attempts"], 1)
+            self.assertEqual(saved_writing["attempts"], writing_attempts)
+            runtime.prompt.assert_awaited_once()
+            self.assertIn("previous response failed the strict JSON protocol", runtime.prompt.await_args.args[0])
+
+            await runtime._settled()
+
+            failed = runtime._project()
+            failed_verify = next(
+                item for item in failed["workflow"]["phases"] if item["id"] == "verify"
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed_verify["protocol_attempts"], 2)
+            self.assertEqual(
+                next(item for item in failed["workflow"]["phases"] if item["id"] == "writing")["attempts"],
+                writing_attempts,
+            )
+
+    async def test_document_review_reject_writes_host_report_then_repairs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "verify"
+            workflow["mode"] = "run"
+            verify = next(item for item in workflow["phases"] if item["id"] == "verify")
+            verify.update({"status": "running", "attempts": 1})
+            snapshot = workspace_hashes(runtime.workspace)
+            workflow["stage_snapshot"] = snapshot
+            workflow["review_snapshot"] = snapshot
+            runtime._save_project(project)
+            runtime._last_assistant_text = self._document_review("reject")
+            runtime._gate_current = lambda _: ([], None)  # type: ignore[method-assign]
+            runtime._start_writing_repair = AsyncMock()  # type: ignore[method-assign]
+
+            await runtime._settled()
+
+            report = (runtime.workspace / "reports" / "VERIFY_REPORT.md").read_text()
+            self.assertIn("\nFAIL\n", report)
+            self.assertIn("A table clips on physical PDF page 2.", report)
+            runtime._start_writing_repair.assert_awaited_once()
+
+    async def test_document_reviewer_workspace_write_fails_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow["current"] = "verify"
+            workflow["mode"] = "run"
+            verify = next(item for item in workflow["phases"] if item["id"] == "verify")
+            verify.update({"status": "running", "attempts": 1})
+            snapshot = workspace_hashes(runtime.workspace)
+            workflow["stage_snapshot"] = snapshot
+            workflow["review_snapshot"] = snapshot
+            runtime._save_project(project)
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            (runtime.workspace / "paper" / "reviewer-write.txt").write_text("forbidden")
+            runtime._last_assistant_text = self._document_review()
+
+            await runtime._settled()
+
+            saved = runtime._project()
+            self.assertEqual(saved["status"], "failed")
+            self.assertIn("Document Reviewer modified", saved["workflow"]["phases"][-1]["last_error"])
+            self.assertFalse((runtime.workspace / "reports" / "VERIFY_REPORT.md").exists())
 
     async def test_paper_planning_gate_advances_to_diagram(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2764,6 +2912,29 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
             policy = runtime.rpc_command.await_args_list[-1].args[0]
             self.assertEqual(policy["type"], "prompt")
+            self.assertEqual(
+                policy["message"],
+                f"/mathmodel-tool-policy {runtime._tool_policy_token} review",
+            )
+
+    async def test_verify_session_switches_to_read_only_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "project.json").write_text(json.dumps({
+                "workflow": {
+                    "mode": "run",
+                    "current": "verify",
+                    "profiles": {"planner": {
+                        "model": "openai/gpt-5.6-sol", "thinking": "high"
+                    }},
+                }
+            }), encoding="utf-8")
+            runtime = TaskRuntime("a" * 12, workspace)
+            runtime.rpc_command = AsyncMock(return_value={"success": True})  # type: ignore[method-assign]
+
+            await runtime._switch_session("planner")
+
+            policy = runtime.rpc_command.await_args_list[-1].args[0]
             self.assertEqual(
                 policy["message"],
                 f"/mathmodel-tool-policy {runtime._tool_policy_token} review",

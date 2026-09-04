@@ -38,6 +38,18 @@ METHOD_REVIEW_CHECKS = (
     "figure_contract",
 )
 METHOD_REVIEW_ISSUES = {"none", "method", "ambiguity", "evidence", "budget", "blocked"}
+DOCUMENT_REVIEW_CHECKS = (
+    "claim_coverage",
+    "manifest_anchors",
+    "evidence_consistency",
+    "references_and_figures",
+    "compilation",
+    "visual_readability",
+    "document_structure",
+)
+DOCUMENT_REVIEW_ISSUES = {
+    "none", "content", "manifest", "evidence", "compilation", "visual", "blocked"
+}
 EVIDENCE_LEVELS = {"A_certified", "B_bounded_numerical", "C_exploratory"}
 FAILURE_CATEGORIES = {
     "domain_event",
@@ -353,6 +365,118 @@ def parse_review(text: str, *, review_type: str, problem_id: str | None = None) 
         "issues": issues,
         "required_repairs": repairs,
     }
+
+
+def parse_document_review(text: str) -> dict[str, Any]:
+    """Parse a strict, read-only Document Verification verdict."""
+    stripped = text.strip()
+    if stripped.startswith("```json") and stripped.endswith("```"):
+        stripped = stripped[7:-3].strip()
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ScientificContractError(
+            f"document review is not strict JSON: {exc.msg}"
+        ) from exc
+    item = _object(value, "document review")
+    expected = {
+        "schema_version", "review_type", "problem_id", "verdict",
+        *DOCUMENT_REVIEW_CHECKS, "issue_class", "summary", "issues",
+        "required_repairs", "warnings",
+    }
+    unknown = set(item) - expected
+    missing = expected - set(item)
+    if unknown or missing:
+        raise ScientificContractError(
+            f"document review keys mismatch; missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    if (
+        item["schema_version"] != 1
+        or item["review_type"] != "document"
+        or item["problem_id"] is not None
+    ):
+        raise ScientificContractError("document review identity mismatch")
+    verdict = item["verdict"]
+    if verdict not in {"accept", "reject", "blocked"}:
+        raise ScientificContractError("document review verdict is invalid")
+    checks = {name: item[name] for name in DOCUMENT_REVIEW_CHECKS}
+    if any(value not in {"pass", "fail"} for value in checks.values()):
+        raise ScientificContractError("document review checks must be pass or fail")
+    issue_class = item["issue_class"]
+    if issue_class not in DOCUMENT_REVIEW_ISSUES:
+        raise ScientificContractError("document review issue_class is invalid")
+    summary = _text(item["summary"], "document review.summary")
+    issues = _text_list(item["issues"], "document review.issues", empty=True)
+    repairs = _text_list(
+        item["required_repairs"], "document review.required_repairs", empty=True
+    )
+    warnings = _text_list(item["warnings"], "document review.warnings", empty=True)
+    if verdict == "accept":
+        if (
+            any(value != "pass" for value in checks.values())
+            or issue_class != "none"
+            or issues
+            or repairs
+        ):
+            raise ScientificContractError(
+                "accepted document review must have all-pass checks and no issues"
+            )
+    elif issue_class == "none" or not issues or not repairs:
+        raise ScientificContractError(
+            "non-accepted document review requires issue_class, issues, and repairs"
+        )
+    return {
+        "schema_version": 1,
+        "review_type": "document",
+        "problem_id": None,
+        "verdict": verdict,
+        **checks,
+        "issue_class": issue_class,
+        "summary": summary,
+        "issues": issues,
+        "required_repairs": repairs,
+        "warnings": warnings,
+    }
+
+
+def document_review_markdown(
+    review: dict[str, Any], host_errors: list[str] | None = None
+) -> str:
+    """Render the Host-owned verification report from validated JSON."""
+    host_errors = host_errors or []
+    one_line = lambda value: " ".join(str(value).split())
+    passed = review["verdict"] == "accept" and not host_errors
+    lines = [
+        "# Document Verification Report",
+        "",
+        "## Conclusion",
+        "",
+        "PASS" if passed else "FAIL",
+        "",
+        "## Summary",
+        "",
+        one_line(review["summary"]),
+        "",
+        "## Checks",
+        "",
+        "| Check | Result |",
+        "| --- | --- |",
+    ]
+    lines.extend(
+        f"| `{name}` | {review[name].upper()} |" for name in DOCUMENT_REVIEW_CHECKS
+    )
+    sections = (
+        ("Host gate errors", host_errors),
+        ("Issues", review["issues"]),
+        ("Required repairs", review["required_repairs"]),
+        ("Warnings", review["warnings"]),
+    )
+    for title, values in sections:
+        lines.extend(["", f"## {title}", ""])
+        lines.extend(
+            (f"- {one_line(value)}" for value in values) if values else ["None."]
+        )
+    return "\n".join(lines) + "\n"
 
 
 def parse_method_review(text: str, *, problem_id: str) -> dict[str, Any]:
