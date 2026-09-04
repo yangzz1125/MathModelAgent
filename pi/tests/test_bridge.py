@@ -57,6 +57,7 @@ from pi.staged_workflow import (
     frozen_errors,
     initial_workflow,
     method_version_dir,
+    method_revision_prompt,
     plan_revision_prompt,
     result_errors,
     spike_budget,
@@ -837,6 +838,14 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 method_prompt,
             )
             self.assertIn("Do not inspect Host implementation", method_prompt)
+            revision_text = method_revision_prompt(
+                inventory,
+                "q1",
+                2,
+                {"allowed_downgrades": [{"claim_id": "q1.objective"}]},
+            )
+            self.assertIn("Preserve all claim IDs and evidence levels exactly", revision_text)
+            self.assertIn("later explicit downgrade-only stage", revision_text)
 
             card = self._card(inventory)
             card["problem"]["figure_specs"] = [{"reference_id": "trend-01-sensitivity"}]

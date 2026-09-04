@@ -1139,7 +1139,7 @@ def method_revision_prompt(
     evidence = json.dumps(review, ensure_ascii=False, indent=2)
     return f"""{base}
 
-This is a targeted revision. Read the immediately preceding immutable proposal version under planning/methods/{problem_id}/ before writing v{version}. Resolve every item below without changing the accepted inventory or upstream artifacts. Do not strengthen evidence beyond what is applicable and affordable.
+This is a targeted ordinary revision. Read the immediately preceding immutable proposal version under planning/methods/{problem_id}/ before writing v{version}. Resolve every non-downgrade audit item without changing the accepted inventory or upstream artifacts. Preserve all claim IDs and evidence levels exactly in this ordinary revision, even when the audit lists `allowed_downgrades`; the Host may authorize those only in a later explicit downgrade-only stage after ordinary audits are exhausted. Do not strengthen or downgrade evidence here.
 
 Method audit evidence:
 {evidence}"""
