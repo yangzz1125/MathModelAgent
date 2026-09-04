@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import katex from "katex";
 import { marked } from "marked";
 import type { Renderer, RendererObject } from "marked";
@@ -7,8 +8,6 @@ const defaultOptions = {
 	breaks: true, // 允许换行
 	gfm: true, // 启用GitHub风格的Markdown
 	headerIds: true, // 为标题添加id
-	mangle: false, // 不转义标题中的HTML
-	sanitize: false, // 不净化HTML
 };
 
 // 处理数学公式
@@ -80,18 +79,18 @@ marked.use({
 	},
 });
 
+export const sanitizeHtml = (content: string) => DOMPurify.sanitize(content);
+
 /**
- * 渲染Markdown文本为HTML
- * @param content Markdown文本
- * @param options 可选的marked配置项
- * @returns 渲染后的HTML
+ * 渲染并净化 Markdown 文本
  */
-export const renderMarkdown = async (content: string, options = {}) => {
-	// 预处理内容，确保数学公式正确换行
+export const renderMarkdown = (content: string, options = {}) => {
 	const normalized = content
 		.replace(/\\\[\s*\n/g, "\\[")
 		.replace(/\n\s*\\\]/g, "\\]");
-	return marked.parse(normalized, { ...defaultOptions, ...options });
+	return sanitizeHtml(
+		marked.parse(normalized, { ...defaultOptions, ...options }) as string,
+	);
 };
 
 /**

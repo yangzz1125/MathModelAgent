@@ -990,7 +990,12 @@ def stage_scope_errors(
     else:
         return [f"artifact_changed: unknown stage boundary {stage}"]
     disallowed = sorted(
-        path for path in changed if not any(path.startswith(prefix) for prefix in allowed)
+        path
+        for path in changed
+        if not any(
+            path.startswith(prefix) if prefix.endswith("/") else path == prefix
+            for prefix in allowed
+        )
     )
     return [f"artifact_changed: stage wrote outside its boundary: {path}" for path in disallowed]
 

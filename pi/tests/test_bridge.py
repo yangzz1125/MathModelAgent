@@ -446,6 +446,10 @@ class StagedWorkflowContractTest(unittest.TestCase):
             (workspace / "_tmp").mkdir()
             (workspace / "_tmp" / "check.txt").write_text("temporary")
             self.assertEqual(stage_scope_errors(workspace, verify_baseline, "verify"), [])
+            (workspace / "reports" / "VERIFY_REPORT.md.extra").write_text("unexpected")
+            self.assertEqual(stage_scope_errors(workspace, verify_baseline, "verify"), [
+                "artifact_changed: stage wrote outside its boundary: reports/VERIFY_REPORT.md.extra"
+            ])
 
             (workspace / "results" / "q2").mkdir(parents=True)
             (workspace / "results" / "q2" / "future.json").write_text("{}")
