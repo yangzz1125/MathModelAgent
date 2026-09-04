@@ -339,10 +339,12 @@ def validate_method_card(
         "proposal_version": version,
         "problem_id": problem_id,
         "problem": normalized_problem,
-        **{field: str(raw.get(field) or "").strip() for field in text_fields},
     }
-    if any(not normalized[field] for field in text_fields):
-        raise ContractError(f"{problem_id} method domain/witness/exclusion fields are required")
+    for field in text_fields:
+        value = raw.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ContractError(f"{problem_id}.{field} must be a non-empty string")
+        normalized[field] = value.strip()
     cost = raw.get("cost_model")
     if not isinstance(cost, dict) or set(cost) != {
         "operation", "estimated_operations", "estimated_seconds", "memory_mb", "scaling"
@@ -1112,11 +1114,11 @@ Write only planning/methods/{problem_id}/v{version}/method_card.json and reports
 ```
 All `inputs` and `outputs` entries are literal relative path strings, never descriptions such as "candidate metrics". `outputs` must include at least one path under each of `code/{problem_id}/`, `results/{problem_id}/`, and the exact file `reports/{problem_id}_RESULTS.md`; figure artifacts use `figures/{problem_id}/`. Every future generated artifact named by the method must be declared as a path in `outputs`.
 
-Claim `type` is exactly one of `identity_or_constraint`, `feasibility`, `optimality`, `event_or_boundary`, `approximation`, `estimate_or_prediction`, `ranking_or_decision`, or `other`. Every claim adds evidence_level, requested_output_ids, and limitations (non-empty for Level B/C). Every requested-output ID needs at least one A_certified or B_bounded_numerical claim; C_exploratory is supplementary only. Every failure_semantics object has exactly id, event_id, category, condition, and action; category is `domain_event`, `mathematical_infeasibility`, `numerical_failure`, `data_or_input_failure`, or `decision_outcome`. Conditions describing the same physical event share event_id and category.
+Claim `type` is exactly one of `identity_or_constraint`, `feasibility`, `optimality`, `event_or_boundary`, `approximation`, `estimate_or_prediction`, `ranking_or_decision`, or `other`. Every claim adds evidence_level, requested_output_ids, and limitations (non-empty for Level B/C). Every requested-output ID needs at least one A_certified or B_bounded_numerical claim; C_exploratory is supplementary only. The union of all `independent_validation[].claims` must equal the complete set of claim IDs; every claim requires independent validation, including figure, limitation, implementation-constraint, and paper-readiness claims. Every failure_semantics object has exactly id, event_id, category, condition, and action; category is `domain_event`, `mathematical_infeasibility`, `numerical_failure`, `data_or_input_failure`, or `decision_outcome`. Conditions describing the same physical event share event_id and category.
 
-If figures are required, every `figure_specs` object has exactly `id`, `claim_ids`, `purpose`, `plot_family`, `reference_id`, `panels`, `primary_encoding`, `secondary_encoding`, `required_annotations`, `final_width`, `vector_path`, `preview_path`, `generator_path`, `data_paths`, and `required_data_fields`. `generator_path` must be under `code/{problem_id}/`; vector/preview paths must be under `figures/{problem_id}/`; generated data paths must be under `results/{problem_id}/`; every generated path must also appear in `outputs`. Copy plot_family from the selected catalog reference.
+If figures are required, every `figure_specs` object has exactly `id`, `claim_ids`, `purpose`, `plot_family`, `reference_id`, `panels`, `primary_encoding`, `secondary_encoding`, `required_annotations`, `final_width`, `vector_path`, `preview_path`, `generator_path`, `data_paths`, and `required_data_fields`. `panels` contains 1--3 non-empty distinct strings. `primary_encoding` is exactly `position`, `length`, `color`, `area`, or `angle`; `final_width` is exactly `single_column`, `double_column`, or `full`; `secondary_encoding` is one non-empty descriptive string. `generator_path` must be under `code/{problem_id}/`; vector/preview paths must be under `figures/{problem_id}/`; generated data paths must be under `results/{problem_id}/`; every generated path must also appear in `outputs`. Copy plot_family exactly from the selected catalog reference.
 
-State finite domains, witnesses/brackets, gap/tail exclusion, mutually exclusive failure semantics, independent validation, figure specs, and a realistic runtime limit. cost_model has exactly operation, estimated_operations, estimated_seconds, memory_mb, scaling. spike_spec has exactly questions, representative_cases, required_metrics and required_witnesses; each list entry is {{id,description}}, IDs are globally unique, and only required_witnesses may be empty. Prefer the cheapest scientifically honest evidence; never invent an unaffordable formal certificate. Stop after the two method artifacts."""
+The top-level `finite_domain`, `witness_strategy`, and `gap_or_tail_exclusion` values are each one non-empty string, not objects or arrays. State finite domains, witnesses/brackets, gap/tail exclusion, mutually exclusive failure semantics, independent validation, figure specs, and a realistic runtime limit. cost_model has exactly operation, estimated_operations, estimated_seconds, memory_mb, scaling. spike_spec has exactly questions, representative_cases, required_metrics and required_witnesses; each list entry is {{id,description}}, IDs are globally unique, and only required_witnesses may be empty. Prefer the cheapest scientifically honest evidence; never invent an unaffordable formal certificate. Stop after the two method artifacts."""
 
 
 def method_revision_prompt(

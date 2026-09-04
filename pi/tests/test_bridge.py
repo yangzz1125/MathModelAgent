@@ -786,6 +786,10 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 method_prompt,
             )
             self.assertIn("must have exactly these top-level fields", method_prompt)
+            self.assertIn("The union of all `independent_validation[].claims`", method_prompt)
+            self.assertIn("`primary_encoding` is exactly `position`", method_prompt)
+            self.assertIn("`final_width` is exactly `single_column`", method_prompt)
+            self.assertIn("are each one non-empty string, not objects or arrays", method_prompt)
             self.assertIn(
                 "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
                 method_prompt,
@@ -1057,6 +1061,16 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw)
             changed = validate_method_card(workspace, inventory, "q1", 1)
             self.assertNotEqual(first["method_spec_sha256"], changed["method_spec_sha256"])
+
+    def test_method_card_domain_witness_fields_require_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = validate_problem_inventory(workspace, 1)
+            card = self._card(inventory)
+            card["finite_domain"] = {"lower": 0, "upper": 1}
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", card)
+            with self.assertRaisesRegex(ContractError, "finite_domain must be a non-empty string"):
+                validate_method_card(workspace, inventory, "q1", 1)
 
     def test_contradictory_failure_semantics_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
