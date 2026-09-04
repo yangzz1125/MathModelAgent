@@ -1575,8 +1575,16 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 },
             })
             TASKS.clear()
-            with patch.object(bridge, "WORKSPACES", Path(directory)):
+            with (
+                patch.object(bridge, "WORKSPACES", Path(directory)),
+                patch.object(
+                    bridge.os,
+                    "kill",
+                    side_effect=SystemError("Windows returned OSError with an exception set"),
+                ) as kill,
+            ):
                 runtime = bridge._runtime(task_id)
+            kill.assert_called_once_with(999999999, 0)
             self.assertEqual(runtime.status, "paused")
             self.assertEqual(runtime._project()["pause_reason"], "bridge_restart")
             TASKS.clear()
