@@ -4,6 +4,16 @@ const REVIEW_TOOLS = ["read", "grep", "find", "ls"];
 const WORK_TOOLS = ["read", "bash", "edit", "write"];
 
 export default function mathModelToolPolicy(pi: ExtensionAPI) {
+	const activate = (mode: "review" | "work") => {
+		const requested = mode === "review" ? REVIEW_TOOLS : WORK_TOOLS;
+		const available = new Set(pi.getAllTools().map((tool) => tool.name));
+		const active = requested.filter((tool) => available.has(tool));
+		pi.setActiveTools(active);
+		if (!active.includes("read")) {
+			throw new Error("Required Pi read tool is unavailable");
+		}
+	};
+
 	pi.registerFlag("mathmodel-review", {
 		description: "Start MathModelAgent with read-only Reviewer capabilities",
 		type: "boolean",
@@ -11,10 +21,7 @@ export default function mathModelToolPolicy(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", () => {
-		if (pi.getFlag("mathmodel-review")) {
-			const available = new Set(pi.getAllTools().map((tool) => tool.name));
-			pi.setActiveTools(REVIEW_TOOLS.filter((tool) => available.has(tool)));
-		}
+		activate(pi.getFlag("mathmodel-review") ? "review" : "work");
 	});
 
 	pi.registerCommand("mathmodel-tool-policy", {
@@ -29,13 +36,7 @@ export default function mathModelToolPolicy(pi: ExtensionAPI) {
 			) {
 				throw new Error("Unauthorized MathModelAgent tool-policy command");
 			}
-			const requested = mode === "review" ? REVIEW_TOOLS : WORK_TOOLS;
-			const available = new Set(pi.getAllTools().map((tool) => tool.name));
-			const active = requested.filter((tool) => available.has(tool));
-			if (!active.includes("read")) {
-				throw new Error("Required Pi read tool is unavailable");
-			}
-			pi.setActiveTools(active);
+			activate(mode as "review" | "work");
 		},
 	});
 }

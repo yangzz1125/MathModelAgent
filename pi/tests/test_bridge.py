@@ -3017,6 +3017,14 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(response["success"])
             self.assertIn(b'"type": "new_session"', stdin.data)
 
+    def test_tool_policy_initializes_work_and_review_sessions(self) -> None:
+        source = bridge.TOOL_POLICY_EXTENSION.read_text(encoding="utf-8")
+        self.assertIn(
+            'activate(pi.getFlag("mathmodel-review") ? "review" : "work")',
+            source,
+        )
+        self.assertIn('activate(mode as "review" | "work")', source)
+
     async def test_switch_session_uses_frozen_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
