@@ -58,6 +58,8 @@ from pi.staged_workflow import (
     initial_workflow,
     method_version_dir,
     method_revision_prompt,
+    paper_plan_repair_prompt,
+    paper_planning_prompt,
     plan_revision_prompt,
     result_errors,
     scientific_review_prompt,
@@ -529,6 +531,13 @@ class StagedWorkflowContractTest(unittest.TestCase):
         self.assertIn("render every physical PDF page at at least 160 DPI", writing)
         self.assertIn("`page-NN.png`", writing)
         self.assertIn("one color and one grayscale image for every page", writing)
+        paper_plan = paper_planning_prompt(1)
+        self.assertIn("may contain only accepted current-problem artifact paths", paper_plan)
+        self.assertIn("Never use `reports/PLAN_COMPLETENESS.json`", paper_plan)
+        self.assertIn(
+            "not scientific evidence",
+            paper_plan_repair_prompt(["paper_coverage: evidence is not frozen"]),
+        )
 
     def test_result_contract_and_frozen_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
