@@ -1085,6 +1085,36 @@ def paper_source_errors(workspace: Path) -> list[str]:
         r"\\(?:newpage|clearpage)\s*\\(?:newpage|clearpage)\b", text
     ):
         errors.append("paper_layout: consecutive forced page breaks")
+
+    log_path = paper / "main.log"
+    pdf_path = paper / "main.pdf"
+    if pdf_path.is_file() and log_path.is_file():
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"Output written on .*?\((\d+) pages?\)", log_text)
+        if not match:
+            errors.append("paper_visual: main.log does not report the compiled page count")
+        else:
+            page_count = int(match.group(1))
+            rendered = paper / "rendered_pages"
+            for page_number in range(1, page_count + 1):
+                for suffix in ("", "-gray"):
+                    relative = f"paper/rendered_pages/page-{page_number:02d}{suffix}.png"
+                    image_path = rendered / f"page-{page_number:02d}{suffix}.png"
+                    try:
+                        from PIL import Image
+
+                        with Image.open(image_path) as image:
+                            image.load()
+                            width, height = image.size
+                            extrema = image.convert("L").getextrema()
+                        if min(width, height) < 800:
+                            errors.append(
+                                f"paper_visual: rendered page is below readable resolution: {relative} ({width}x{height})"
+                            )
+                        if extrema[0] == extrema[1]:
+                            errors.append(f"paper_visual: rendered page is blank: {relative}")
+                    except (FileNotFoundError, OSError, ValueError) as exc:
+                        errors.append(f"paper_visual: missing or unreadable rendered page: {relative}: {exc}")
     return errors
 
 

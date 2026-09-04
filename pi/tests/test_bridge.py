@@ -60,6 +60,7 @@ from pi.staged_workflow import (
     method_revision_prompt,
     plan_revision_prompt,
     result_errors,
+    scientific_review_prompt,
     spike_budget,
     spike_prompt,
     spike_repair_prompt,
@@ -370,6 +371,25 @@ class ScientificContractsTest(unittest.TestCase):
             body.write_text("Methods \\cite{lp,ip}.\n")
             self.assertEqual(paper_source_errors(workspace), [])
 
+            (paper / "main.pdf").write_bytes(b"%PDF-1.7\n")
+            (paper / "main.log").write_text(
+                "Output written on main.pdf (2 pages).\n", encoding="utf-8"
+            )
+            self.assertIn(
+                "paper_visual: missing or unreadable rendered page: paper/rendered_pages/page-01.png",
+                paper_source_errors(workspace)[0],
+            )
+            from PIL import Image
+
+            rendered = paper / "rendered_pages"
+            rendered.mkdir()
+            for page_number in (1, 2):
+                for suffix in ("", "-gray"):
+                    image = Image.new("L", (800, 1000), 255)
+                    image.putpixel((10, 10), 0)
+                    image.save(rendered / f"page-{page_number:02d}{suffix}.png")
+            self.assertEqual(paper_source_errors(workspace), [])
+
             (paper / "main.tex").write_text(
                 "\\tableofcontents\n\\tableofcontents\n"
                 "\\input{sections/body}\n\\newpage\n\\input{references}\n"
@@ -499,6 +519,16 @@ class StagedWorkflowContractTest(unittest.TestCase):
         self.assertIn("do not edit/create files, run compilation", prompt)
         self.assertIn("Return only strict JSON", prompt)
         self.assertIn("Host alone writes reports/VERIFY_REPORT.md", prompt)
+        self.assertIn("Use `read` on every listed `paper/rendered_pages", prompt)
+        review = scientific_review_prompt(self._problem())
+        self.assertIn("Use the `read` tool on every produced PNG preview", review)
+        self.assertIn("crosses an axes/figure boundary", review)
+        writing = final_stage_prompt(
+            "writing", competition="MCM", language="English", paper_engine="LaTeX"
+        )
+        self.assertIn("render every physical PDF page at at least 160 DPI", writing)
+        self.assertIn("`page-NN.png`", writing)
+        self.assertIn("one color and one grayscale image for every page", writing)
 
     def test_result_contract_and_frozen_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
