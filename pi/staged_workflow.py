@@ -1181,7 +1181,26 @@ Use this accepted method card:
 
 Write only planning/methods/{problem_id}/v{version}/spike{suffix}/. Put executable probe code in probe.py and strict data in spike_report.json. The total declared runtime budget is at most {budget} seconds. Do not write code/, results/, figures/, reports/, execution_plan.json, or accepted artifacts. Benchmark representative kernel operations and produce required witnesses/brackets when requested; do not run the full solution.
 
-spike_report.json has exactly schema_version=1, status='candidate', problem_id, method_spec_sha256='{card['method_spec_sha256']}', budget_seconds, actual_runtime_seconds, answered_question_ids, probe_scope, benchmarks, estimated_full_runtime_seconds, peak_memory_mb, witnesses, unresolved_risks, and artifact_paths. answered_question_ids and probe_scope contain planned question/case IDs. Each benchmark adds metric_id to name, operations, seconds, throughput, unit; each witness adds witness_id to type, summary, artifact_paths.{target_note} Every artifact, including probe.py and witness files, must be listed and stay inside this Spike directory. Timeout or process failure is numerical/planning feasibility evidence, never mathematical infeasibility or a domain event. Stop after writing the candidate report."""
+The JSON must match this exact shape (replace values, not keys):
+```json
+{{
+  "schema_version": 1,
+  "status": "candidate",
+  "problem_id": "{problem_id}",
+  "method_spec_sha256": "{card['method_spec_sha256']}",
+  "budget_seconds": {budget},
+  "actual_runtime_seconds": 0.1,
+  "answered_question_ids": ["planned question IDs only"],
+  "probe_scope": ["planned representative-case IDs only"],
+  "benchmarks": [{{"metric_id":"planned metric ID","name":"...","operations":1,"seconds":0.1,"throughput":10.0,"unit":"operations/s"}}],
+  "estimated_full_runtime_seconds": 1.0,
+  "peak_memory_mb": 1.0,
+  "witnesses": [{{"witness_id":"planned witness ID","type":"...","summary":"...","artifact_paths":["planning/methods/{problem_id}/v{version}/spike{suffix}/witness.json"]}}],
+  "unresolved_risks": [],
+  "artifact_paths": ["planning/methods/{problem_id}/v{version}/spike{suffix}/probe.py", "planning/methods/{problem_id}/v{version}/spike{suffix}/witness.json"]
+}}
+```
+`answered_question_ids` equals the Method Card question-ID set exactly and `probe_scope` equals the representative-case-ID set exactly; never put question IDs in `probe_scope`. `benchmarks[].metric_id` equals the required-metric-ID set and `witnesses[].witness_id` equals the required-witness-ID set. Each benchmark has exactly metric_id, name, operations, seconds, throughput, unit; operations, seconds, and throughput are positive finite numbers and `throughput = operations / seconds` within 5% (use the measured operation count, not `1 / seconds`). Each witness has exactly witness_id, type, summary, artifact_paths.{target_note} Every artifact, including probe.py and witness files, must be listed and stay inside this Spike directory. Timeout or process failure is numerical/planning feasibility evidence, never mathematical infeasibility or a domain event. Stop after writing the candidate report."""
 
 
 def spike_repair_prompt(

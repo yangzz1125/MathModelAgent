@@ -60,6 +60,7 @@ from pi.staged_workflow import (
     plan_revision_prompt,
     result_errors,
     spike_budget,
+    spike_prompt,
     stage_scope_errors,
     validate_execution_plan,
     validate_method_card,
@@ -790,6 +791,15 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertIn("`primary_encoding` is exactly `position`", method_prompt)
             self.assertIn("`final_width` is exactly `single_column`", method_prompt)
             self.assertIn("are each one non-empty string, not objects or arrays", method_prompt)
+            spike_text = spike_prompt({
+                "problem_id": "q1",
+                "proposal_version": 1,
+                "method_spec_sha256": "a" * 64,
+                "problem": {"runtime_limit_seconds": 120},
+            })
+            self.assertIn('"probe_scope": ["planned representative-case IDs only"]', spike_text)
+            self.assertIn("never put question IDs in `probe_scope`", spike_text)
+            self.assertIn("`throughput = operations / seconds` within 5%", spike_text)
             self.assertIn(
                 "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
                 method_prompt,
