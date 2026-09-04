@@ -833,6 +833,8 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertIn("`primary_encoding` is exactly `position`", method_prompt)
             self.assertIn("`final_width` is exactly `single_column`", method_prompt)
             self.assertIn("are each one non-empty string, not objects or arrays", method_prompt)
+            self.assertIn("Do not require a production figure, vector/PDF export", method_prompt)
+            self.assertIn("one lightweight Agg canvas", method_prompt)
             spike_text = spike_prompt({
                 "problem_id": "q1",
                 "proposal_version": 1,
