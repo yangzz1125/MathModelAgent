@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("127.0.0.1")]
     [string]$HostAddress = "127.0.0.1",
     [int]$BridgePort = 8000,
     [int]$FrontendPort = 5173,

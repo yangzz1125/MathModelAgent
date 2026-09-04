@@ -1787,6 +1787,11 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
 class BridgeHelpersTest(unittest.TestCase):
     """Cover path safety, progress discovery, and prompt construction."""
 
+    def test_supported_web_launcher_is_loopback_only(self) -> None:
+        script = (bridge.ROOT / "scripts" / "start_web.ps1").read_text(encoding="utf-8")
+        self.assertIn('[ValidateSet("127.0.0.1")]', script)
+        self.assertIn('"--host", $HostAddress', script)
+
     def test_safe_file_stays_inside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

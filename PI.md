@@ -60,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File E:\MathModelAgentPi\scripts\start_web.p
   -Thinking high
 ```
 
-Open `http://127.0.0.1:5173/chat`. The new-project flow is deterministic and does not call a model:
+Open `http://127.0.0.1:5173/chat`. The supported launcher is intentionally loopback-only because the personal-use Bridge has no authentication; non-loopback Uvicorn/frontend launches are unsupported and unsafe. The new-project flow is deterministic and does not call a model:
 
 1. Choose an official contest folder such as `A题/` or select loose files.
 2. Click **初始化项目**. The bridge preserves the folder layout under `workspaces/<project-id>/input/`, detects the main problem, and creates `project.json`, `input_manifest.json`, `todo.md`, `planning/`, `reports/`, `code/`, `results/`, `figures/`, and `paper/`.

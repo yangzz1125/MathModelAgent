@@ -65,6 +65,7 @@
 
 - Bridge：`http://127.0.0.1:8000`
 - Frontend：`http://127.0.0.1:5173/chat`
+- 个人版 Bridge 无认证，受支持的 `start_web.ps1` 只允许 `127.0.0.1`；直接使用 Uvicorn/Vite 绑定非 loopback 地址不受支持且不安全。
 
 ## 真题启动参数
 
