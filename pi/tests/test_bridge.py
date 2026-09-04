@@ -829,6 +829,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("must have exactly these top-level fields", method_prompt)
             self.assertIn("The union of all `independent_validation[].claims`", method_prompt)
+            self.assertIn("full quantifier, domain, regimes, boundary sides", method_prompt)
             self.assertIn("`primary_encoding` is exactly `position`", method_prompt)
             self.assertIn("`final_width` is exactly `single_column`", method_prompt)
             self.assertIn("are each one non-empty string, not objects or arrays", method_prompt)
@@ -872,6 +873,8 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertIn("All bash calls and repairs share the one declared budget", spike_text)
             self.assertIn("set `text.usetex=False` after the style", spike_text)
             self.assertIn("write a structurally complete truthful checkpoint", spike_text)
+            self.assertIn("resolve workspace files from `Path.cwd()`", spike_text)
+            self.assertIn("do not infer the root with brittle", spike_text)
             self.assertIn(
                 "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
                 method_prompt,
