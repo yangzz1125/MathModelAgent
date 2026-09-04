@@ -53,9 +53,9 @@ const sendMessage = () => {
     </div>
     <form class="w-full max-w-2xl mx-auto flex items-center gap-2 pt-4" @submit.prevent="sendMessage">
       <Input ref="inputRef" v-model="inputValue" type="text" placeholder="向 Pi 发送后续指令..." class="flex-1"
-        autocomplete="off" :disabled="taskStore.wsStatus !== 'connected'" />
+        autocomplete="off" :disabled="!taskStore.canSendMessage" />
       <Button type="submit" size="icon"
-        :disabled="!inputValue.trim() || taskStore.wsStatus !== 'connected'" title="发送">
+        :disabled="!inputValue.trim() || !taskStore.canSendMessage" title="发送">
         <Send />
       </Button>
     </form>

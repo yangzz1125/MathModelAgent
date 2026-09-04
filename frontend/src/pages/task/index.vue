@@ -92,9 +92,9 @@ async function handleResume() {
 }
 
 /** 同步 Pi 任务运行状态 */
-function handleRuntimeStatus(status: string) {
+function handleRuntimeStatus(status: string, contractVersion: number | null) {
 	isPaused.value = status === "paused";
-	taskStore.setRunning(status === "starting" || status === "running");
+	taskStore.setRuntimeStatus(status, contractVersion);
 }
 
 // ---- Lifecycle Hooks ----

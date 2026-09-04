@@ -67,6 +67,8 @@ Open `http://127.0.0.1:5173/chat`. The new-project flow is deterministic and doe
 3. Review the detected problem and data files, then choose competition, language, paper engine, and two Pi profiles. By default Sol high handles planning/review while Luna high handles execution/writing. Select **规划和执行使用同一模型** for the legacy single-model behavior.
 4. Click **开始执行**. Only this step starts the Pi RPC process.
 
+After start, contract-v3 chat is output-only: the Bridge rejects free-form WebSocket prompts and the UI disables its input, so a message cannot steer an autonomous stage. Use the explicit pause, resume, and cancel controls. Historical contract-v1/v2 follow-up behavior is unchanged.
+
 The bridge runs this contract-v3 sequence for new projects:
 
 ```text

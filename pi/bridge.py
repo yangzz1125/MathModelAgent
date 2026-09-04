@@ -3656,6 +3656,16 @@ async def task_messages(task_id: str) -> list[dict[str, Any]]:
     return list(_runtime(task_id).messages)
 
 
+def _freeform_prompt_allowed(runtime: "TaskRuntime") -> bool:
+    try:
+        workflow = runtime._project().get("workflow")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return not (
+        isinstance(workflow, dict) and workflow.get("contract_version") == 3
+    )
+
+
 @app.websocket("/task/{task_id}")
 async def task_socket(websocket: WebSocket, task_id: str) -> None:
     try:
@@ -3672,6 +3682,13 @@ async def task_socket(websocket: WebSocket, task_id: str) -> None:
                 continue
             text = str(payload.get("message") or "").strip()
             if not text:
+                continue
+            if not _freeform_prompt_allowed(runtime):
+                await websocket.send_json(_message(
+                    "system",
+                    "Contract-v3 自治任务不接受自由指令，请使用暂停、恢复或取消控制。",
+                    type="warning",
+                ))
                 continue
             user_message = _message("user", text)
             if client_id := payload.get("id"):

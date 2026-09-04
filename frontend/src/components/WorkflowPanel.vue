@@ -13,7 +13,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 // ---- Props ----
 
 const props = defineProps<{ taskId: string }>();
-const emit = defineEmits<(event: "status", status: string) => void>();
+const emit = defineEmits<(
+	event: "status",
+	status: string,
+	contractVersion: number | null,
+) => void>();
 
 // ---- State ----
 
@@ -98,7 +102,7 @@ function reviewLabel(value?: string) {
 async function refresh() {
 	try {
 		status.value = (await getTaskStatus(props.taskId)).data;
-		emit("status", status.value.status);
+		emit("status", status.value.status, status.value.contract_version);
 	} catch (error) {
 		console.error("获取 Pi 任务状态失败:", error);
 	}

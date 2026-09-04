@@ -49,6 +49,19 @@ export const useTaskStore = defineStore("task", () => {
 	/** 任务是否正在运行 */
 	const isRunning = ref(false);
 
+	/** 当前任务的服务端状态与工作流合同。 */
+	const runtimeStatus = ref<string | null>(null);
+	const contractVersion = ref<number | null>(null);
+
+	/** 仅历史工作流的活动会话可接受自由消息。 */
+	const canSendMessage = computed(
+		() =>
+			wsStatus.value === "connected" &&
+			runtimeStatus.value !== null &&
+			contractVersion.value !== 3 &&
+			["starting", "running", "waiting"].includes(runtimeStatus.value),
+	);
+
 	// ---- Helpers ----
 
 	/** 获取消息时间戳 */
@@ -147,9 +160,11 @@ export const useTaskStore = defineStore("task", () => {
 
 	// ---- Actions ----
 
-	/** 同步后端运行状态 */
-	function setRunning(running: boolean) {
-		isRunning.value = running;
+	/** 同步后端运行状态与合同版本。 */
+	function setRuntimeStatus(status: string, version: number | null) {
+		runtimeStatus.value = status;
+		contractVersion.value = version;
+		isRunning.value = status === "starting" || status === "running";
 	}
 
 	/** 连接 WebSocket 接收实时消息 */
@@ -160,6 +175,8 @@ export const useTaskStore = defineStore("task", () => {
 		}
 		setCurrentTask(taskId);
 		ensureTaskBucket(taskId);
+		runtimeStatus.value = null;
+		contractVersion.value = null;
 		isRunning.value = true;
 
 		const baseUrl = import.meta.env.VITE_WS_URL;
@@ -176,11 +193,7 @@ export const useTaskStore = defineStore("task", () => {
 				// 检测任务完成/停止/失败消息
 				if (data.msg_type === "system") {
 					const msgType = Reflect.get(data, "type");
-					if (
-						msgType === "success" ||
-						msgType === "warning" ||
-						msgType === "error"
-					) {
+					if (msgType === "success" || msgType === "error") {
 						isRunning.value = false;
 					}
 				}
@@ -215,7 +228,10 @@ export const useTaskStore = defineStore("task", () => {
 	async function pauseTask(taskId: string) {
 		try {
 			const res = await pauseTaskAPI(taskId);
-			if (res.data.success) isRunning.value = false;
+			if (res.data.success) {
+				runtimeStatus.value = "paused";
+				isRunning.value = false;
+			}
 			return res.data;
 		} catch (error) {
 			console.error("暂停任务失败:", error);
@@ -227,7 +243,10 @@ export const useTaskStore = defineStore("task", () => {
 	async function resumeTask(taskId: string) {
 		try {
 			const res = await resumeTaskAPI(taskId);
-			if (res.data.success) isRunning.value = true;
+			if (res.data.success) {
+				runtimeStatus.value = "running";
+				isRunning.value = true;
+			}
 			return res.data;
 		} catch (error) {
 			console.error("恢复任务失败:", error);
@@ -240,6 +259,7 @@ export const useTaskStore = defineStore("task", () => {
 		try {
 			const res = await cancelTaskAPI(taskId);
 			if (res.data.success) {
+				runtimeStatus.value = "cancelled";
 				isRunning.value = false;
 			}
 			return res.data;
@@ -252,7 +272,7 @@ export const useTaskStore = defineStore("task", () => {
 	/** 发送消息到当前 Pi 会话 */
 	function sendMessage(content: string) {
 		const text = content.trim();
-		if (!text || !currentTaskId.value || !ws) {
+		if (!text || !currentTaskId.value || !ws || !canSendMessage.value) {
 			return false;
 		}
 		const message = {
@@ -390,6 +410,9 @@ export const useTaskStore = defineStore("task", () => {
 		messages,
 		wsStatus,
 		isRunning,
+		runtimeStatus,
+		contractVersion,
+		canSendMessage,
 		chatMessages,
 		coordinatorMessages,
 		modelerMessages,
@@ -399,7 +422,7 @@ export const useTaskStore = defineStore("task", () => {
 		toolMessages,
 		files,
 		setCurrentTask,
-		setRunning,
+		setRuntimeStatus,
 		loadTaskMessages,
 		connectWebSocket,
 		closeWebSocket,

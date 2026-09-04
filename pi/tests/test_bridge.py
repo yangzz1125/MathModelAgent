@@ -3367,6 +3367,89 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 f"/mathmodel-tool-policy {runtime._tool_policy_token} review",
             )
 
+    async def test_contract_v3_websocket_rejects_freeform_prompt(self) -> None:
+        class Socket:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, object]] = []
+                self.received = False
+
+            async def accept(self) -> None:
+                pass
+
+            async def close(self, **_: object) -> None:
+                pass
+
+            async def receive_json(self) -> dict[str, str]:
+                if self.received:
+                    raise bridge.WebSocketDisconnect()
+                self.received = True
+                return {"type": "prompt", "id": "message", "message": "steer"}
+
+            async def send_json(self, message: dict[str, object]) -> None:
+                self.sent.append(message)
+
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = "a" * 12
+            workspace = Path(directory) / task_id
+            workspace.mkdir()
+            (workspace / "project.json").write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 3},
+            }), encoding="utf-8")
+            runtime = TaskRuntime(task_id, workspace, status="running")
+            runtime.publish = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            socket = Socket()
+            TASKS.clear()
+            TASKS[task_id] = runtime
+            with patch.object(bridge, "WORKSPACES", Path(directory)):
+                await bridge.task_socket(socket, task_id)  # type: ignore[arg-type]
+
+            runtime.publish.assert_not_awaited()
+            runtime.prompt.assert_not_awaited()
+            self.assertEqual(len(socket.sent), 1)
+            self.assertEqual(socket.sent[0]["msg_type"], "system")
+            self.assertEqual(socket.sent[0]["type"], "warning")
+            self.assertNotIn(socket, runtime.clients)
+            TASKS.clear()
+
+    async def test_contract_v2_websocket_keeps_legacy_prompt(self) -> None:
+        class Socket:
+            def __init__(self) -> None:
+                self.received = False
+
+            async def accept(self) -> None:
+                pass
+
+            async def receive_json(self) -> dict[str, str]:
+                if self.received:
+                    raise bridge.WebSocketDisconnect()
+                self.received = True
+                return {"type": "prompt", "message": "legacy follow-up"}
+
+            async def send_json(self, _: dict[str, object]) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = "b" * 12
+            workspace = Path(directory) / task_id
+            workspace.mkdir()
+            (workspace / "project.json").write_text(json.dumps({
+                "status": "running",
+                "workflow": {"contract_version": 2},
+            }), encoding="utf-8")
+            runtime = TaskRuntime(task_id, workspace, status="running")
+            runtime.publish = AsyncMock()  # type: ignore[method-assign]
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            TASKS.clear()
+            TASKS[task_id] = runtime
+            with patch.object(bridge, "WORKSPACES", Path(directory)):
+                await bridge.task_socket(Socket(), task_id)  # type: ignore[arg-type]
+
+            runtime.publish.assert_awaited_once()
+            runtime.prompt.assert_awaited_once_with("legacy follow-up")
+            TASKS.clear()
+
     async def test_watchdog_aborts_only_current_agent_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = TaskRuntime("a" * 12, Path(directory))
