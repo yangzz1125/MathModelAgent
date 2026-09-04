@@ -51,6 +51,7 @@ from pi.staged_workflow import (
     artifact_hashes,
     canonical_hash,
     expand_problem_phases,
+    final_stage_prompt,
     frozen_errors,
     initial_workflow,
     method_version_dir,
@@ -453,6 +454,13 @@ class StagedWorkflowContractTest(unittest.TestCase):
             self.assertTrue(any("results/q2/future.json" in error for error in errors))
             self.assertTrue(any("input/problem.md" in error for error in errors))
 
+    def test_verify_prompt_keeps_compilation_outside_paper_boundary(self) -> None:
+        prompt = final_stage_prompt(
+            "verify", competition="MCM", language="English", paper_engine="LaTeX"
+        )
+        self.assertIn("Never run a compiler from paper/", prompt)
+        self.assertIn("copy the complete paper source tree into _tmp/", prompt)
+
     def test_result_contract_and_frozen_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = self._workspace(directory)
@@ -709,8 +717,13 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(card["method_spec_sha256"]), 64)
             self.assertEqual(spike_budget(60), 20)
             self._write_spike(workspace, card)
+            report_path = method_version_dir(workspace, "q1", 1) / "spike" / "spike_report.json"
+            raw_report = json.loads(report_path.read_text(encoding="utf-8"))
+            raw_report["budget_seconds"] = 20.0
+            self._write(report_path, raw_report)
             report = validate_spike_report(workspace, card)
             self.assertEqual(report["status"], "candidate")
+            self.assertEqual(report["budget_seconds"], 20)
 
     def test_level_c_cannot_cover_requested_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

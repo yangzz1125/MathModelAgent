@@ -413,9 +413,17 @@ def validate_spike_report(
         raise ContractError("spike report keys/schema/status mismatch")
     if raw.get("problem_id") != card["problem_id"] or raw.get("method_spec_sha256") != card["method_spec_sha256"]:
         raise ContractError("spike report identity or method-spec hash mismatch")
-    budget = raw.get("budget_seconds")
+    budget_value = raw.get("budget_seconds")
     expected_budget = 60 if supplemental else spike_budget(card["problem"]["runtime_limit_seconds"])
-    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1 or budget > expected_budget:
+    if (
+        isinstance(budget_value, bool)
+        or not isinstance(budget_value, (int, float))
+        or not math.isfinite(float(budget_value))
+        or float(budget_value) != int(budget_value)
+    ):
+        raise ContractError("spike budget_seconds must be an integer-valued number")
+    budget = int(budget_value)
+    if budget < 1 or budget > expected_budget:
         raise ContractError(f"spike budget exceeds {expected_budget} seconds")
     actual = _positive_number(raw.get("actual_runtime_seconds"), "actual_runtime_seconds", allow_zero=True)
     if actual > budget:
@@ -530,6 +538,7 @@ def validate_spike_report(
         raise ContractError("spike witness artifacts must be declared in artifact_paths")
     return {
         **raw,
+        "budget_seconds": budget,
         "answered_question_ids": question_ids,
         "probe_scope": scope,
         "benchmarks": benchmarks,
@@ -1316,5 +1325,5 @@ Compile a non-empty PDF under paper/. Also write paper/paper_manifest.json with 
 }}
 Every anchor must occur exactly once in its section and all six anchors must be distinct. The limitation anchor must identify a real limitation, not a model or conclusion phrase, and must not contain or be contained by another anchor. Every explicit `\\bibitem{{key}}` must be cited by at least one body `\\cite{{key}}`, and no body citation may reference an absent key. Do not include uncited background references. The key is exactly `figures`, not `figure_paths`. Stop after the PDF, manifest, and rendered-page inspection are complete."""
     if stage == "verify":
-        return """Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md, paper_plan.json, paper/paper_manifest.json, and accepted `verification.json.figures` entries. This is Document Verification, not scientific re-acceptance. Confirm every accepted claim is substantively covered, all six manifest anchors per claim are unique and semantically truthful, frozen evidence and paper numbers agree, required models/results/independent validations/limitations are present, every listed reference is cited in the body and every citation resolves, compilation succeeds, and every PDF page is visually readable. For every paper figure, confirm the embedded source is the accepted frozen vector master, labels match the paper language, units/scales/legend remain readable at final size, grayscale distinctions survive, and no element overlaps or clips. Confirm there is exactly one contents sequence and that short references are not isolated by unnecessary forced page breaks. Short page count alone is only a warning; missing required scientific content is a hard failure. Do not modify accepted code/results or rewrite/redraw the paper. Temporary isolated checks may use _tmp/, but remove _tmp/ before stopping. If any hard check fails, write a `Required repairs` section with one concrete item per defect, including exact source file, physical PDF page, and affected text/element when available. Write reports/VERIFY_REPORT.md with an unambiguous standalone PASS conclusion only if every hard check passes, then stop."""
+        return """Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md, paper_plan.json, paper/paper_manifest.json, and accepted `verification.json.figures` entries. This is Document Verification, not scientific re-acceptance. Confirm every accepted claim is substantively covered, all six manifest anchors per claim are unique and semantically truthful, frozen evidence and paper numbers agree, required models/results/independent validations/limitations are present, every listed reference is cited in the body and every citation resolves, compilation succeeds, and every PDF page is visually readable. For every paper figure, confirm the embedded source is the accepted frozen vector master, labels match the paper language, units/scales/legend remain readable at final size, grayscale distinctions survive, and no element overlaps or clips. Confirm there is exactly one contents sequence and that short references are not isolated by unnecessary forced page breaks. Short page count alone is only a warning; missing required scientific content is a hard failure. Do not modify accepted code/results or rewrite/redraw the paper. This stage may change only reports/VERIFY_REPORT.md and files under _tmp/. Never run a compiler from paper/ or direct compiler output into paper/. Treat the existing paper/main.log and readable paper/main.pdf as compilation evidence; if an isolated recompilation is necessary, copy the complete paper source tree into _tmp/, compile only there, and remove _tmp/ before stopping. If any hard check fails, write a `Required repairs` section with one concrete item per defect, including exact source file, physical PDF page, and affected text/element when available. Write reports/VERIFY_REPORT.md with an unambiguous standalone PASS conclusion only if every hard check passes, then stop."""
     raise ValueError(f"unknown final stage: {stage}")
