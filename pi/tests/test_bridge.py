@@ -828,6 +828,9 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 supplemental_text,
             )
             self.assertIn("do not copy, carry forward, rename, or invent", supplemental_text)
+            self.assertIn("All bash calls and repairs share the one declared budget", spike_text)
+            self.assertIn("set `text.usetex=False` after the style", spike_text)
+            self.assertIn("write a structurally complete truthful checkpoint", spike_text)
             self.assertIn(
                 "no custom `schema_version`, `input_paths`, `model`, `deliverables`",
                 method_prompt,
