@@ -49,7 +49,7 @@
 
 ## 当前环境
 
-- Python 3.11.6
+- Python 3.11.6（Windows x64；`pi/constraints-win-py311.txt` 精确锁定当前 43 个运行时包）
 - Pi 0.84.4
 - SciencePlots 2.2.2
 - Seaborn 0.13.2
@@ -59,6 +59,7 @@
 - Node 24.13.0
 - pnpm 11.22.0
 - 中文字体：Source Han Serif SC
+- `setup_pi.ps1` 拒绝非 Python 3.11，按锁文件安装后执行 `pip check`、关键版本/导入和中文字体检查；锁文件只在完整回归后更新。
 - 磁盘 E: 可用约 267 GB
 
 服务：

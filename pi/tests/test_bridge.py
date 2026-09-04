@@ -1787,6 +1787,23 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
 class BridgeHelpersTest(unittest.TestCase):
     """Cover path safety, progress discovery, and prompt construction."""
 
+    def test_scientific_environment_is_locked_to_windows_python311(self) -> None:
+        constraints = bridge.ROOT / "pi" / "constraints-win-py311.txt"
+        locked = {
+            line.split("==", 1)[0].lower()
+            for line in constraints.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        }
+        self.assertTrue({
+            "numpy", "pandas", "matplotlib", "scienceplots", "seaborn",
+            "scipy", "scikit-learn", "openpyxl", "fastapi",
+            "python-multipart", "uvicorn", "adjusttext",
+        } <= locked)
+        setup = (bridge.ROOT / "scripts" / "setup_pi.ps1").read_text(encoding="utf-8")
+        self.assertIn('$requiredPython = "3.11"', setup)
+        self.assertIn('-r $requirements -c $constraints', setup)
+        self.assertIn("Locked scientific Python and figure environment: OK", setup)
+
     def test_supported_web_launcher_is_loopback_only(self) -> None:
         script = (bridge.ROOT / "scripts" / "start_web.ps1").read_text(encoding="utf-8")
         self.assertIn('[ValidateSet("127.0.0.1")]', script)

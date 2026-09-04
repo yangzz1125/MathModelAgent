@@ -34,7 +34,7 @@ Create or refresh the isolated scientific Python environment:
 powershell -ExecutionPolicy Bypass -File E:\MathModelAgentPi\scripts\setup_pi.ps1
 ```
 
-The setup script installs `pi/requirements.txt` into `.venv-pi`. The launcher activates that environment only for the Pi process and does not modify system Python.
+The setup script installs `pi/requirements.txt` into `.venv-pi` under exact `pi/constraints-win-py311.txt` constraints. The supported scientific runtime is Windows x64 with Python 3.11; setup fails rather than silently resolving a different stack. The launcher activates that environment only for the Pi process and does not modify system Python. Update the constraints only after a full regression run.
 
 Check the environment from Pi with:
 
