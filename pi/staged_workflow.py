@@ -1020,6 +1020,22 @@ Write only planning/inventory/v{version}/problem_inventory.json and reports/PROB
 Competition: {competition}. Paper language: {language}. User notes: {notes or 'None'}. Stop after both inventory artifacts exist."""
 
 
+def local_artifact_repair_prompt(
+    base_prompt: str,
+    *,
+    artifact: str,
+    version: int,
+    errors: list[str],
+) -> str:
+    details = "\n".join(f"- {error}" for error in errors)
+    return f"""{base_prompt}
+
+The Host rejected the current {artifact} artifacts. This is a same-version local format repair for version {version}, not a semantic revision. Re-read and repair only the current stage artifacts in place. Do not create another version, change accepted upstream evidence, start a Spike or execution, or search Host validators/tests. Preserve scientifically valid content and correct every gate error below.
+
+Gate evidence:
+{details}"""
+
+
 def inventory_audit_prompt(
     inventory: dict[str, Any], evidence_paths: list[str] | None = None
 ) -> str:

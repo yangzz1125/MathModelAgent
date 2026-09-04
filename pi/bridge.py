@@ -55,6 +55,7 @@ from pi.staged_workflow import (
     inventory_path,
     inventory_prompt,
     inventory_revision_prompt,
+    local_artifact_repair_prompt,
     method_audit_prompt,
     method_proposal_prompt,
     method_revision_prompt,
@@ -107,6 +108,7 @@ MAX_PROJECT_BYTES = 500 * 1024 * 1024
 RPC_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 MAX_VERIFY_REPAIRS = 2
 MAX_SPIKE_REPAIRS = 2
+MAX_LOCAL_ARTIFACT_REPAIRS = 2
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 SCAFFOLD_DIRS = ("reports", "code", "results", "figures", "paper", "planning")
@@ -1001,51 +1003,69 @@ class TaskRuntime:
         errors = [str(phase.get("last_error") or "Interrupted by a user pause; recheck current artifacts before continuing.")]
         problem = self._problem(workflow)
         context_paths = self._stage_context_paths(project)
-        if mode == "inventory":
-            return inventory_prompt(
-                problem_file=str(project["problem_file"]),
-                version=int(workflow.get("inventory_version") or 1),
-                competition=str(project.get("competition") or "CUMCM"),
-                language=str(project.get("language") or "Chinese"),
-                notes="",
-                evidence_paths=context_paths,
+        if mode in {"inventory", "inventory_revision"}:
+            version = int(workflow.get("inventory_version") or 1)
+            base = (
+                inventory_prompt(
+                    problem_file=str(project["problem_file"]),
+                    version=version,
+                    competition=str(project.get("competition") or "CUMCM"),
+                    language=str(project.get("language") or "Chinese"),
+                    notes="",
+                    evidence_paths=context_paths,
+                )
+                if mode == "inventory"
+                else inventory_revision_prompt(
+                    workflow.get("last_review") or {}, version, context_paths
+                )
             )
+            if int(phase.get("local_repair_attempts") or 0):
+                return local_artifact_repair_prompt(
+                    base,
+                    artifact="Inventory",
+                    version=version,
+                    errors=errors,
+                )
+            return base
         if mode == "inventory_audit":
             return inventory_audit_prompt(self._inventory(workflow), context_paths)
-        if mode == "inventory_revision":
-            return inventory_revision_prompt(
-                workflow.get("last_review") or {},
-                int(workflow.get("inventory_version") or 1),
-                context_paths,
-            )
         if mode in {"method_proposal", "method_revision", "evidence_downgrade"}:
             problem_id = self._phase_problem_id(workflow)
             if problem_id:
                 inventory = self._inventory(workflow)
                 version = self._proposal_version(workflow)
                 if mode == "method_proposal":
-                    return method_proposal_prompt(
+                    base = method_proposal_prompt(
                         inventory,
                         problem_id,
                         version,
                         canonical_hash(inventory),
                         context_paths,
                     )
-                if mode == "evidence_downgrade":
-                    return evidence_downgrade_prompt(
+                elif mode == "evidence_downgrade":
+                    base = evidence_downgrade_prompt(
                         inventory,
                         problem_id,
                         version,
                         workflow.get("last_review") or {},
                         context_paths,
                     )
-                return method_revision_prompt(
-                    inventory,
-                    problem_id,
-                    version,
-                    workflow.get("last_review") or {},
-                    context_paths,
-                )
+                else:
+                    base = method_revision_prompt(
+                        inventory,
+                        problem_id,
+                        version,
+                        workflow.get("last_review") or {},
+                        context_paths,
+                    )
+                if int(phase.get("local_repair_attempts") or 0):
+                    return local_artifact_repair_prompt(
+                        base,
+                        artifact=f"Method Card for {problem_id}",
+                        version=version,
+                        errors=errors,
+                    )
+                return base
         if mode == "feasibility_spike":
             card = self._method_card(workflow)
             if card:
@@ -2751,6 +2771,7 @@ class TaskRuntime:
             if kind == "spike":
                 phase.pop("local_repair_attempts", None)
             if kind == "method":
+                phase.pop("local_repair_attempts", None)
                 phase["attempts"] = int(phase.get("attempts") or 0) + 1
                 phase["started_at"] = _now()
         workflow["revision_base_evidence_levels"] = {
@@ -2830,6 +2851,7 @@ class TaskRuntime:
             return
         inventory_phase = next(item for item in workflow["phases"] if item["id"] == "inventory")
         if review["verdict"] != "blocked" and int(inventory_phase.get("attempts") or 1) < 2:
+            inventory_phase.pop("local_repair_attempts", None)
             new_version = version + 1
             workflow["inventory_version"] = new_version
             workflow["current"] = "inventory"
@@ -2971,6 +2993,45 @@ class TaskRuntime:
             await self.prompt(self._prompt_for_current(self._project()))
             return
         await self._complete_current(project, card)
+
+    async def _retry_local_artifact_v3(
+        self,
+        project: dict[str, Any],
+        errors: list[str],
+        *,
+        artifact: str,
+    ) -> None:
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        repairable = errors and all(
+            error.startswith(("artifact_missing:", "validation_failed:"))
+            for error in errors
+        )
+        if not phase or not repairable:
+            await self._wait_with_errors(errors)
+            return
+        repairs = int(phase.get("local_repair_attempts") or 0)
+        if repairs >= MAX_LOCAL_ARTIFACT_REPAIRS:
+            await self._wait_with_errors([
+                f"{artifact}_repair_exhausted: {error}" for error in errors
+            ])
+            return
+        phase["local_repair_attempts"] = repairs + 1
+        phase["last_error"] = "; ".join(errors)[:2000]
+        workflow["stage_snapshot"] = workspace_hashes(self.workspace)
+        project["status"] = "running"
+        self._save_project(project)
+        await self.system(
+            f"{artifact} 格式门禁未通过，正在执行同版本局部修复 "
+            f"{repairs + 1}/{MAX_LOCAL_ARTIFACT_REPAIRS}",
+            "warning",
+        )
+        try:
+            await self.prompt(self._prompt_for_current(self._project()))
+        except Exception as exc:
+            await self._wait_with_errors([
+                f"rpc_error: {artifact} local repair failed: {exc}"
+            ])
 
     async def _retry_spike_v3(
         self, project: dict[str, Any], errors: list[str]
@@ -3191,37 +3252,18 @@ class TaskRuntime:
         errors, artifact = self._gate_current(project)
         if stage == "inventory":
             if errors:
-                inventory_phase = self._current_phase(workflow)
-                if int((inventory_phase or {}).get("attempts") or 1) >= 2:
-                    await self._wait_with_errors(errors)
-                    return
-                synthetic = {"issues": errors, "required_repairs": errors}
-                workflow["last_review"] = synthetic
-                workflow["inventory_version"] = int(workflow.get("inventory_version") or 1) + 1
-                if inventory_phase:
-                    inventory_phase["attempts"] = 2
-                    inventory_phase["last_error"] = "; ".join(errors)[:2000]
-                ledger = self._ledger()
-                ledger["inventory"] = {"version": workflow["inventory_version"], "status": "candidate"}
-                self._save_ledger(ledger)
-                workflow["mode"] = "inventory_revision"
-                workflow["stage_snapshot"] = workspace_hashes(self.workspace)
-                self._save_project(project)
-                await self._switch_session("planner")
-                await self.prompt(self._prompt_for_current(self._project()))
+                await self._retry_local_artifact_v3(
+                    project, errors, artifact="inventory"
+                )
             else:
                 assert artifact is not None
                 await self._complete_current(project, artifact)
             return
         if stage.startswith("method:"):
             if errors:
-                phase = self._current_phase(workflow)
-                if int((phase or {}).get("attempts") or 1) >= 3:
-                    await self._wait_with_errors(errors)
-                else:
-                    await self._restart_v3_problem_planning(
-                        project, {"issues": errors, "required_repairs": errors}
-                    )
+                await self._retry_local_artifact_v3(
+                    project, errors, artifact="method"
+                )
             else:
                 assert artifact is not None
                 await self._finish_method_artifact_v3(project, artifact)

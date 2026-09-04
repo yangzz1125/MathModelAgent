@@ -1085,6 +1085,146 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ContractError, "metrics coverage mismatch"):
                 validate_spike_report(workspace, card)
 
+    async def test_inventory_validation_retries_same_version_and_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            workflow = initial_workflow(
+                {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+                {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+                contract_version=3,
+            )
+            workflow["phases"][0].update({"status": "running", "attempts": 1})
+            self._write(workspace / "planning" / "ledger.json", {
+                "schema_version": 1,
+                "inventory": {"version": 1, "status": "candidate"},
+                "problems": {},
+                "plan_version": 0,
+            })
+            workflow["stage_snapshot"] = workspace_hashes(workspace)
+            self._write(workspace / "project.json", {
+                "status": "running",
+                "problem_file": "input/problem.md",
+                "competition": "CUMCM",
+                "language": "Chinese",
+                "paper_engine": "LaTeX",
+                "workflow": workflow,
+            })
+            runtime = TaskRuntime("f" * 12, workspace, status="running")
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
+            (workspace / "reports" / "PROBLEM_INVENTORY_v1.md").unlink()
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            phase = saved["phases"][0]
+            self.assertEqual(saved["inventory_version"], 1)
+            self.assertEqual(phase["attempts"], 1)
+            self.assertEqual(phase["local_repair_attempts"], 1)
+            self.assertEqual(runtime._ledger()["inventory"]["version"], 1)
+            runtime._switch_session.assert_not_awaited()
+            self.assertIn("same-version local format repair", runtime.prompt.await_args.args[0])
+
+            (workspace / "reports" / "PROBLEM_INVENTORY_v1.md").write_text(
+                "# Inventory\n", encoding="utf-8"
+            )
+            await runtime._settled()
+            completed = runtime._project()["workflow"]
+            self.assertEqual(completed["current"], "inventory_audit")
+            self.assertEqual(completed["inventory_version"], 1)
+
+    async def test_method_validation_retries_same_version_without_superseding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow.update({
+                "current": "method:q1",
+                "mode": "method_proposal",
+                "proposal_version": 1,
+            })
+            phase = next(item for item in workflow["phases"] if item["id"] == "method:q1")
+            phase.update({"status": "running", "attempts": 1})
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            card_path = method_version_dir(runtime.workspace, "q1", 1) / "method_card.json"
+            valid_card = card_path.read_text(encoding="utf-8")
+            card = json.loads(valid_card)
+            card.pop("spike_spec")
+            self._write(card_path, card)
+
+            await runtime._settled()
+
+            saved = runtime._project()["workflow"]
+            saved_phase = next(item for item in saved["phases"] if item["id"] == "method:q1")
+            self.assertEqual(saved["proposal_version"], 1)
+            self.assertEqual(saved_phase["attempts"], 1)
+            self.assertEqual(saved_phase["local_repair_attempts"], 1)
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 1)
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["superseded_versions"], [])
+            runtime._switch_session.assert_not_awaited()
+            self.assertIn("same-version local format repair", runtime.prompt.await_args.args[0])
+
+            card_path.write_text(valid_card, encoding="utf-8")
+            await runtime._settled()
+            completed = runtime._project()["workflow"]
+            self.assertEqual(completed["current"], "spike:q1")
+            self.assertEqual(runtime._ledger()["problems"]["q1"]["proposal_version"], 1)
+
+    async def test_method_local_repair_exhaustion_and_scope_violation_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow.update({
+                "current": "method:q1",
+                "mode": "method_proposal",
+                "proposal_version": 1,
+            })
+            phase = next(item for item in workflow["phases"] if item["id"] == "method:q1")
+            phase.update({"status": "running", "attempts": 1})
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            card_path = method_version_dir(runtime.workspace, "q1", 1) / "method_card.json"
+            card = json.loads(card_path.read_text(encoding="utf-8"))
+            card.pop("spike_spec")
+            self._write(card_path, card)
+
+            await runtime._settled()
+            await runtime._settled()
+            await runtime._settled()
+
+            failed = runtime._project()
+            failed_phase = next(
+                item for item in failed["workflow"]["phases"] if item["id"] == "method:q1"
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed_phase["attempts"], 1)
+            self.assertEqual(failed_phase["local_repair_attempts"], 2)
+            self.assertIn("method_repair_exhausted", failed_phase["last_error"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._runtime_at_method_audit(directory)
+            project = runtime._project()
+            workflow = project["workflow"]
+            workflow.update({"current": "method:q1", "mode": "method_proposal"})
+            phase = next(item for item in workflow["phases"] if item["id"] == "method:q1")
+            phase.update({"status": "running", "attempts": 1})
+            workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
+            runtime._save_project(project)
+            (runtime.workspace / "results" / "forbidden.json").write_text("{}")
+
+            await runtime._settled()
+
+            failed = runtime._project()
+            failed_phase = next(
+                item for item in failed["workflow"]["phases"] if item["id"] == "method:q1"
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertNotIn("local_repair_attempts", failed_phase)
+            runtime.prompt.assert_not_awaited()
+
     async def test_failed_spike_retries_without_method_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._runtime_at_method_audit(directory)
