@@ -717,6 +717,96 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             "allowed_downgrades": [],
         })
 
+    def test_stage_context_is_limited_to_inputs_dependencies_and_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = self._workspace(directory)
+            inventory = self._inventory()
+            q2 = json.loads(json.dumps(inventory["problems"][0]))
+            q2.update({
+                "id": "q2",
+                "label": "Problem 2",
+                "depends_on": ["q1"],
+                "requested_outputs": [{"id": "q2.output", "statement": "optimal decision and objective"}],
+            })
+            inventory["problems"].append(q2)
+            self._write(
+                workspace / "planning" / "inventory" / "v1" / "problem_inventory.json",
+                inventory,
+            )
+            dependency = workspace / "results" / "q1" / "accepted.json"
+            dependency.parent.mkdir(parents=True)
+            dependency.write_text("{}", encoding="utf-8")
+            unrelated = workspace / "results" / "q3" / "unrelated.json"
+            unrelated.parent.mkdir(parents=True)
+            unrelated.write_text("{}", encoding="utf-8")
+            old_method = workspace / "planning" / "methods" / "q9" / "v1" / "method_card.json"
+            old_method.parent.mkdir(parents=True)
+            old_method.write_text("{}", encoding="utf-8")
+            workflow = initial_workflow(
+                {"model": "openai/gpt-5.6-sol", "thinking": "high"},
+                {"model": "openai/gpt-5.6-luna", "thinking": "high"},
+                contract_version=3,
+            )
+            expand_problem_phases(workflow, inventory)
+            workflow.update({
+                "current": "method:q2",
+                "mode": "method_proposal",
+                "proposal_version": 1,
+                "frozen": {"q1": {"results/q1/accepted.json": "hash"}},
+            })
+            self._write(workspace / "planning" / "ledger.json", {
+                "schema_version": 1,
+                "inventory": {"version": 1, "status": "accepted"},
+                "problems": {"q2": {"proposal_version": 1, "status": "candidate"}},
+                "plan_version": 0,
+            })
+            project = {
+                "problem_file": "input/problem.md",
+                "competition": "CUMCM",
+                "language": "Chinese",
+                "paper_engine": "LaTeX",
+                "workflow": workflow,
+            }
+            runtime = TaskRuntime("a" * 12, workspace)
+
+            method_paths = runtime._stage_context_paths(project)
+            self.assertIn("input/problem.md", method_paths)
+            self.assertIn("results/q1/accepted.json", method_paths)
+            self.assertNotIn("results/q3/unrelated.json", method_paths)
+            self.assertNotIn("planning/methods/q9/v1/method_card.json", method_paths)
+            method_prompt = runtime._prompt_for_current(project)
+            self.assertIn("Host assembled this complete allowlist", method_prompt)
+            self.assertIn("results/q1/accepted.json", method_prompt)
+            self.assertIn("figure-reference-catalog.json", method_prompt)
+            self.assertIn("Do not inspect Host implementation", method_prompt)
+
+            card = self._card(inventory)
+            card["problem"]["figure_specs"] = [{"reference_id": "trend-01-sensitivity"}]
+            references = runtime._figure_reference_context(card["problem"])
+            self.assertEqual([item["id"] for item in references], ["trend-01-sensitivity"])
+            self.assertEqual(len(references), 1)
+
+            self._write_card(workspace, inventory)
+            normalized_card = validate_method_card(workspace, inventory, "q1", 1)
+            execution_problem = normalized_card["problem"]
+            self._write(workspace / "execution_plan.json", {
+                "schema_version": 2,
+                "plan_version": 1,
+                "problems": [execution_problem],
+            })
+            candidate = workspace / "code" / "q1" / "solve.py"
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text("print(1)\n", encoding="utf-8")
+            workflow.update({"current": "problem:q1", "mode": "scientific_review"})
+            candidate_paths = runtime._stage_context_paths(project)
+            self.assertIn("code/q1/solve.py", candidate_paths)
+            self.assertNotIn("results/q3/unrelated.json", candidate_paths)
+            review_prompt_text = runtime._prompt_for_current(project)
+            self.assertIn("independent scientific acceptance reviewer", review_prompt_text)
+            self.assertNotIn("Execute exactly one modeling subproblem", review_prompt_text)
+            self.assertIn("code/q1/solve.py", review_prompt_text)
+            self.assertNotIn("results/q3/unrelated.json", review_prompt_text)
+
     def test_v3_phase_order_interleaves_planning_and_execution(self) -> None:
         workflow = initial_workflow(
             {"model": "openai/gpt-5.6-sol", "thinking": "high"},
@@ -2220,6 +2310,23 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("skills/5writing/SKILL.md", writer_prompt)
             self.assertIn("paper_plan.json", writer_prompt)
             self.assertIn("never repository discovery", writer_prompt)
+            paper = runtime.workspace / "paper"
+            (paper / "main.tex").write_text("paper", encoding="utf-8")
+            (paper / "main.pdf").write_bytes(b"pdf")
+            (paper / "main.log").write_text("log", encoding="utf-8")
+            (paper / "main.aux").write_text("aux", encoding="utf-8")
+            page = paper / "rendered_pages" / "page-01.png"
+            page.parent.mkdir()
+            page.write_bytes(b"png")
+            project["workflow"]["current"] = "verify"
+            review_paths = runtime._document_review_context_paths(project)
+            self.assertIn("paper/main.tex", review_paths)
+            self.assertIn("paper/main.pdf", review_paths)
+            self.assertIn("paper/rendered_pages/page-01.png", review_paths)
+            self.assertNotIn("paper/main.aux", review_paths)
+            verify_prompt = runtime._prompt_for_current(project)
+            self.assertIn("paper/rendered_pages/page-01.png", verify_prompt)
+            self.assertIn("do not edit/create files", verify_prompt)
 
     async def test_paper_planning_gate_advances_to_diagram(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

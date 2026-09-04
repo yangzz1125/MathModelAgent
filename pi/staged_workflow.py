@@ -1001,19 +1001,35 @@ def stage_scope_errors(
 
 
 def inventory_prompt(
-    *, problem_file: str, version: int, competition: str, language: str, notes: str
+    *,
+    problem_file: str,
+    version: int,
+    competition: str,
+    language: str,
+    notes: str,
+    evidence_paths: list[str] | None = None,
 ) -> str:
-    return f"""You are the problem-inventory maker. Read {problem_file}, input_manifest.json, relevant input files, and the modeling norms. Do not design algorithms, run computations, write execution_plan.json, or begin a solution.
+    scope = _evidence_scope(evidence_paths)
+    return f"""You are the problem-inventory maker. Use this Host-owned evidence scope:
+{scope}
+
+Read $MATHMODELAGENT_ROOT/skills/2analysis-modeling/SKILL.md and $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md. Do not design algorithms, run computations, write execution_plan.json, or begin a solution.
 
 Write only planning/inventory/v{version}/problem_inventory.json and reports/PROBLEM_INVENTORY_v{version}.md. The JSON has exactly schema_version=1 and an ordered non-empty problems array. Each problem has exactly id, label, depends_on, requested_outputs, input_paths, interpretation, ambiguities, and suggested_evidence_level. requested_outputs is a non-empty list of {{id,statement}} copied from the task; use globally unique stable IDs. Dependencies must reference earlier problem IDs. input_paths may contain only existing input/ paths or input_manifest.json. ambiguities is a list of {{id,interpretations,impact,resolution_needed}}. suggested_evidence_level is A_certified, B_bounded_numerical, or C_exploratory and is advisory only. Do not hide a requested output inside interpretation or add speculative outputs.
 
 Competition: {competition}. Paper language: {language}. User notes: {notes or 'None'}. Stop after both inventory artifacts exist."""
 
 
-def inventory_audit_prompt(inventory: dict[str, Any]) -> str:
+def inventory_audit_prompt(
+    inventory: dict[str, Any], evidence_paths: list[str] | None = None
+) -> str:
     contract = _review_json_contract("inventory", "")
     payload = json.dumps(inventory, ensure_ascii=False, indent=2)
-    return f"""Act as the read-only independent problem-inventory auditor. Re-read the original problem and inputs and check exact problem decomposition, requested-output coverage, dependency order, input boundaries, interpretations, and surfaced ambiguities. Do not design methods, edit/create files, or run computation.
+    scope = _evidence_scope(evidence_paths)
+    return f"""Act as the read-only independent problem-inventory auditor. Use this Host-owned evidence scope:
+{scope}
+
+Re-read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md plus the original problem and inputs, then check exact problem decomposition, requested-output coverage, dependency order, input boundaries, interpretations, and surfaced ambiguities. Do not design methods, edit/create files, or run computation.
 
 Inventory:
 {payload}
@@ -1022,20 +1038,36 @@ Return only strict JSON with null problem_id matching this shape. Treat implemen
 {contract}"""
 
 
-def inventory_revision_prompt(review: dict[str, Any], version: int) -> str:
+def inventory_revision_prompt(
+    review: dict[str, Any],
+    version: int,
+    evidence_paths: list[str] | None = None,
+) -> str:
     payload = json.dumps(review, ensure_ascii=False, indent=2)
-    return f"""Revise only the rejected problem inventory. Write a new append-only version at planning/inventory/v{version}/problem_inventory.json and reports/PROBLEM_INVENTORY_v{version}.md. Do not alter prior versions, design methods, write execution_plan.json, or run computation. Resolve every audit issue while preserving exact task outputs and honest ambiguities.
+    scope = _evidence_scope(evidence_paths)
+    return f"""Revise only the rejected problem inventory using this Host-owned evidence scope:
+{scope}
+
+Write a new append-only version at planning/inventory/v{version}/problem_inventory.json and reports/PROBLEM_INVENTORY_v{version}.md. Do not alter prior versions, design methods, write execution_plan.json, or run computation. Resolve every audit issue while preserving exact task outputs and honest ambiguities.
 
 Audit:
 {payload}"""
 
 
 def method_proposal_prompt(
-    inventory: dict[str, Any], problem_id: str, version: int, inventory_sha256: str
+    inventory: dict[str, Any],
+    problem_id: str,
+    version: int,
+    inventory_sha256: str,
+    evidence_paths: list[str] | None = None,
 ) -> str:
     inventory_problem = next(item for item in inventory["problems"] if item["id"] == problem_id)
     payload = json.dumps(inventory_problem, ensure_ascii=False, indent=2)
-    return f"""Design one method card for {problem_id} only. Read the original inputs, accepted dependency artifacts, modeling norms, figure catalog, and this accepted inventory entry:
+    scope = _evidence_scope(evidence_paths)
+    return f"""Design one method card for {problem_id} only. Use this Host-owned evidence scope:
+{scope}
+
+Read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md and $MATHMODELAGENT_ROOT/pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json, then use this accepted inventory entry:
 {payload}
 
 Write only planning/methods/{problem_id}/v{version}/method_card.json and reports/{problem_id}_METHOD_v{version}.md. Do not write execution_plan.json, Spike code, formal result artifacts, or later methods. The JSON must have exactly schema_version=1, inventory_sha256='{inventory_sha256}', proposal_version={version}, problem_id='{problem_id}', problem, finite_domain, witness_strategy, gap_or_tail_exclusion, cost_model, and spike_spec.
@@ -1044,10 +1076,14 @@ problem is one complete schema-v2 execution-plan problem object. Its requested_o
 
 
 def method_revision_prompt(
-    inventory: dict[str, Any], problem_id: str, version: int, review: dict[str, Any]
+    inventory: dict[str, Any],
+    problem_id: str,
+    version: int,
+    review: dict[str, Any],
+    evidence_paths: list[str] | None = None,
 ) -> str:
     base = method_proposal_prompt(
-        inventory, problem_id, version, canonical_hash(inventory)
+        inventory, problem_id, version, canonical_hash(inventory), evidence_paths
     )
     evidence = json.dumps(review, ensure_ascii=False, indent=2)
     return f"""{base}
@@ -1059,9 +1095,15 @@ Method audit evidence:
 
 
 def evidence_downgrade_prompt(
-    inventory: dict[str, Any], problem_id: str, version: int, review: dict[str, Any]
+    inventory: dict[str, Any],
+    problem_id: str,
+    version: int,
+    review: dict[str, Any],
+    evidence_paths: list[str] | None = None,
 ) -> str:
-    base = method_revision_prompt(inventory, problem_id, version, review)
+    base = method_revision_prompt(
+        inventory, problem_id, version, review, evidence_paths
+    )
     return f"""{base}
 
 This final revision is downgrade-only. Change only Reviewer-listed A_certified claims to B_bounded_numerical and update their statement, evidence, acceptance criterion, uncertainty, and limitations honestly. Requested-output scope, method-spec fields, dependencies, outputs, validation, failure semantics, independent validation, and figures may not change. Do not introduce C_exploratory coverage."""
@@ -1072,18 +1114,23 @@ def spike_prompt(
     *,
     supplemental: bool = False,
     supplemental_ids: list[str] | None = None,
+    evidence_paths: list[str] | None = None,
 ) -> str:
     problem_id = card["problem_id"]
     version = card["proposal_version"]
     suffix = "/supplemental" if supplemental else ""
     budget = 60 if supplemental else spike_budget(card["problem"]["runtime_limit_seconds"])
     payload = json.dumps(card, ensure_ascii=False, indent=2)
+    scope = _evidence_scope(evidence_paths)
     target_note = (
         f" For this supplemental Spike, cover exactly these planned IDs: {supplemental_ids}."
         if supplemental
         else " Cover every planned Spike ID exactly once."
     )
-    return f"""Run one {'supplemental ' if supplemental else ''}feasibility Spike for {problem_id}. This is planning evidence, not a formal solution. Read only input/, input_manifest.json, accepted dependency artifacts, and this method card:
+    return f"""Run one {'supplemental ' if supplemental else ''}feasibility Spike for {problem_id}. This is planning evidence, not a formal solution. Use this Host-owned evidence scope:
+{scope}
+
+Use this accepted method card:
 {payload}
 
 Write only planning/methods/{problem_id}/v{version}/spike{suffix}/. Put executable probe code in probe.py and strict data in spike_report.json. The total declared runtime budget is at most {budget} seconds. Do not write code/, results/, figures/, reports/, execution_plan.json, or accepted artifacts. Benchmark representative kernel operations and produce required witnesses/brackets when requested; do not run the full solution.
@@ -1116,7 +1163,10 @@ Re-read the current probe.py, spike_report.json, witness files, and planning/met
 
 
 def method_audit_prompt(
-    inventory_problem: dict[str, Any], card: dict[str, Any], spike: dict[str, Any]
+    inventory_problem: dict[str, Any],
+    card: dict[str, Any],
+    spike: dict[str, Any],
+    evidence_paths: list[str] | None = None,
 ) -> str:
     contract = json.dumps({
         "schema_version": 1,
@@ -1142,7 +1192,11 @@ def method_audit_prompt(
         "method_card": card,
         "spike_report": spike,
     }, ensure_ascii=False, indent=2)
-    return f"""Act as the independent read-only Method Auditor. Re-read the original inputs, accepted dependencies, modeling norms, and the package below. Do not edit/create files or run expensive computation.
+    scope = _evidence_scope(evidence_paths)
+    return f"""Act as the independent read-only Method Auditor. Use this Host-owned evidence scope:
+{scope}
+
+Read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md and the package below. Do not edit/create files or run expensive computation.
 
 Check statement alignment, mathematical applicability, real Spike-based computational feasibility, declared evidence level, independent validation, dependency consistency, and figure semantics. Prefer the cheapest scientifically honest evidence. Do not demand formal proof for a bounded numerical modeling answer; reject proof inflation, unbounded searches, missing event witnesses, conflicting failure meanings, unaffordable operation counts, or validations equivalent to the primary method. A timeout is not mathematical infeasibility. Request supplemental_spike only for one specific unresolved measurement and list exactly its existing planned IDs in supplemental_spike_ids; otherwise use false and []. allowed_downgrades may contain only {{claim_id,from:'A_certified',to:'B_bounded_numerical',reason}}.
 
@@ -1171,9 +1225,21 @@ Read $MATHMODELAGENT_ROOT/pi/skills/mathmodel-figure-quality/references/figure-r
 User notes: {notes or 'None'}"""
 
 
-def problem_prompt(problem: dict[str, Any]) -> str:
+def problem_prompt(
+    problem: dict[str, Any],
+    evidence_paths: list[str] | None = None,
+    figure_references: list[dict[str, Any]] | None = None,
+) -> str:
     payload = json.dumps(problem, ensure_ascii=False, indent=2)
-    return f"""Execute exactly one modeling subproblem and then stop. Fully read $MATHMODELAGENT_ROOT/skills/3coding-visual/SKILL.md, $MATHMODELAGENT_ROOT/pi/skills/mathmodel-figure-quality/SKILL.md, its references/figure-routing.md, reports/ANALYSIS_MODELING_REPORT.md, and this task contract:
+    scope = _evidence_scope(evidence_paths)
+    reference_payload = json.dumps(figure_references or [], ensure_ascii=False, indent=2)
+    return f"""Execute exactly one modeling subproblem and then stop. Read $MATHMODELAGENT_ROOT/skills/3coding-visual/SKILL.md, $MATHMODELAGENT_ROOT/pi/skills/mathmodel-figure-quality/SKILL.md, and its references/figure-routing.md, then use this Host-owned evidence scope:
+{scope}
+
+Use only these Host-selected figure-reference catalog entries and their exact `$MATHMODELAGENT_ROOT/<preview_path>` previews; do not search the full catalog:
+{reference_payload}
+
+Task contract:
 
 {payload}
 
@@ -1181,7 +1247,7 @@ Do not start any later problem. Write implementation only under code/{problem['i
 
 First implement and time the smallest representative computation. Record smoke_runtime_seconds and estimated_runtime_seconds before the full run. If the estimate exceeds {problem['runtime_limit_seconds']} seconds, change the algorithm before running it. Use one fixed mathematical predicate for search and acceptance; extra precision checks may test sensitivity but may not redefine feasibility. Keep numerical errors distinct from mathematical infeasibility. Implement every declared claim and independent validation; do not silently introduce an approximation absent from the contract.
 
-For every scientific data figure, follow its Planner-owned `figure_specs` entry. Open the selected `reference_id` preview from $MATHMODELAGENT_ROOT/pi/skills/mathmodel-figure-quality/references/figure-reference-catalog.json and preserve only its explanatory structure, hierarchy and encoding logic. Do not substitute another reference or change the planned claims, purpose, family, paths or panels. Ordinary plots must use SciencePlots + the official Seaborn/Matplotlib API; specialized template layouts are allowed only when selected by the plan. Replace all reference/template simulation with current workspace data. Save the generator, source data, vector master and PNG preview at the exact planned paths. Render and inspect at final paper size.
+For every scientific data figure, follow its Planner-owned `figure_specs` entry. Open only the Host-selected reference preview above and preserve its explanatory structure, hierarchy and encoding logic. Do not substitute another reference or change the planned claims, purpose, family, paths or panels. Ordinary plots must use SciencePlots + the official Seaborn/Matplotlib API; specialized template layouts are allowed only when selected by the plan. Replace all reference/template simulation with current workspace data. Save the generator, source data, vector master and PNG preview at the exact planned paths. Render and inspect at final paper size.
 
 Write results/{problem['id']}/result.json with problem_id, status='candidate', and non-empty metrics entries containing name, finite numeric value, unit, and description. Write results/{problem['id']}/verification.json with schema_version=2, status='candidate', smoke_runtime_seconds, estimated_runtime_seconds, actual_runtime_seconds, non-empty checks, a `figures` list (empty only when figure_specs is empty), and exactly one claim_evidence entry per declared claim. Every figures entry must match the schema in the figure-quality Skill, include the exact planned `spec_id`, `reference_id`, and `required_data_fields`, and point to real data, generator, vector master, PNG preview, supporting claims, style stack, language, and completed checks. Ensure every required data field actually exists in a declared CSV header or JSON key. Each claim_evidence entry needs claim_id, status='supported', method, independent boolean, and non-empty evidence_paths inside the current problem boundary. You are proposing a candidate, not accepting your own work. Run the checks and stop."""
 
@@ -1206,9 +1272,13 @@ def _review_json_contract(review_type: str, problem_id: str) -> str:
     )
 
 
-def plan_audit_prompt() -> str:
+def plan_audit_prompt(evidence_paths: list[str] | None = None) -> str:
     contract = _review_json_contract("plan", "")
-    return f"""Act as an independent scientific plan auditor. Re-read the original problem statement, relevant attachments, $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md, reports/ANALYSIS_MODELING_REPORT.md, and execution_plan.json. Do not trust the planner summary, edit files, run expensive computation, or begin implementation.
+    scope = _evidence_scope(evidence_paths)
+    return f"""Act as an independent scientific plan auditor. Use this Host-owned evidence scope:
+{scope}
+
+Read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md. Do not trust the planner summary, edit files, run expensive computation, or begin implementation.
 
 Check statement coverage, dependency correctness, assumptions, every approximation or surrogate, claim-specific evidence obligations, failure semantics, independent validation, optimality/event/convergence claims, runtime feasibility, and every figure_specs entry. For continuous/global claims, reject missing finite domains, witnesses, gap/tail exclusions, computable bounds, or realistic nested-operation budgets. Also reject proof inflation: formal root/interval tools must match the mathematical object and cover objective plus inequality constraints; otherwise the claim must be scoped as a numerical estimate with explicit limitations. Do not demand a formal theorem when the problem asks for a numerical modeling answer and a bounded, reproducible, independently challenged estimate is scientifically honest. Reject figure plans whose reference family does not fit the claim, whose panels do not share a scientific context, whose required data fields cannot expose the stated certificate, or whose source-data path is not real problem evidence. Reject plans that can pass by self-reporting, conflate solver failure with a domain event, use an undeclared proxy, or provide validation equivalent to the primary method.
 
@@ -1216,9 +1286,15 @@ Return only strict JSON matching this shape, with null problem_id. No prose or M
 {contract}"""
 
 
-def plan_revision_prompt(audit: dict[str, Any]) -> str:
+def plan_revision_prompt(
+    audit: dict[str, Any], evidence_paths: list[str] | None = None
+) -> str:
     evidence = json.dumps(audit, ensure_ascii=False, indent=2)
-    return f"""The independent plan audit rejected execution_plan.json. Re-read the original inputs and revise reports/ANALYSIS_MODELING_REPORT.md plus the full schema-v2 execution_plan.json in place. Preserve problem IDs and valid dependency order. Resolve every issue below without writing code or starting execution. Stop after validating both planning artifacts.
+    scope = _evidence_scope(evidence_paths)
+    return f"""The independent plan audit rejected execution_plan.json. Use this Host-owned evidence scope:
+{scope}
+
+Revise reports/ANALYSIS_MODELING_REPORT.md plus the full schema-v2 execution_plan.json in place. Preserve problem IDs and valid dependency order. Resolve every issue below without writing code or starting execution. Stop after validating both planning artifacts.
 
 Prefer the cheapest scientifically honest repair. Do not answer an audit request for stronger evidence by inventing an inapplicable formal proof or an exhaustive search whose nested operation count exceeds the runtime limit. Instead define finite witnesses/brackets and conservative checks that are executable, narrow an ambiguity with explicit justification, or scope a global-sounding claim as a reproducible numerical estimate with domain, resolution, uncertainty and limitation. Failure conditions must have mutually exclusive meanings. First-event figures must use an event reference and expose real bound/bracket/certificate fields.
 
@@ -1226,9 +1302,21 @@ Audit evidence:
 {evidence}"""
 
 
-def scientific_review_prompt(problem: dict[str, Any]) -> str:
+def scientific_review_prompt(
+    problem: dict[str, Any],
+    evidence_paths: list[str] | None = None,
+    figure_references: list[dict[str, Any]] | None = None,
+) -> str:
     contract = _review_json_contract("scientific", problem["id"])
-    return f"""Act as the independent scientific acceptance reviewer for {problem['id']}. Re-read the original problem and relevant attachments, $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md, execution_plan.json, accepted dependency artifacts, and this problem's code, result, verification evidence, and report. Do not trust candidate status, planner claims, or worker prose. Do not edit/create files or run expensive computations.
+    scope = _evidence_scope(evidence_paths)
+    reference_payload = json.dumps(figure_references or [], ensure_ascii=False, indent=2)
+    return f"""Act as the independent scientific acceptance reviewer for {problem['id']}. Read $MATHMODELAGENT_ROOT/skills/_references/math_modeling_norms.md, then use this Host-owned evidence scope:
+{scope}
+
+Use only these selected figure-reference entries and exact `$MATHMODELAGENT_ROOT/<preview_path>` previews:
+{reference_payload}
+
+Do not trust candidate status, planner claims, or worker prose. Do not edit/create files or run expensive computations.
 
 Check that the candidate answers the exact requested output, implements the declared method, exposes every approximation, keeps failure semantics correct, supports optimality/event/feasibility claims with evidence at the level promised by the contract, and uses genuinely independent validation. Require formal global proof only when the claim actually promises certification; a bounded numerical estimate may pass when its domain, resolution, uncertainty, convergence and limitations are truthful and independently challenged. Reject either overclaiming or silently weakening the planned claim. Also inspect every `verification.json.figures` entry, its matching Planner `figure_specs` entry, selected reference preview, real source data, generator, vector and rendered preview. Confirm every required_data_fields value exists and carries the plotted bound, bracket, threshold or certificate linkage. The produced figure must preserve the reference's useful explanatory structure without copying its data. Axes, units, scales, uncertainty and sample size must not mislead; bars require a defensible baseline; heatmaps require a meaningful colormap/center; plotted values must agree with frozen candidate evidence; labels and legends must be readable.
 
@@ -1238,9 +1326,17 @@ Return only strict JSON matching this shape. No prose or Markdown fences:
 {contract}"""
 
 
-def scientific_repair_prompt(problem: dict[str, Any], review: dict[str, Any]) -> str:
+def scientific_repair_prompt(
+    problem: dict[str, Any],
+    review: dict[str, Any],
+    evidence_paths: list[str] | None = None,
+) -> str:
     evidence = json.dumps(review, ensure_ascii=False, indent=2)
-    return f"""Scientific review rejected candidate {problem['id']} with issue class {review['issue_class']}. Repair only code/{problem['id']}/, results/{problem['id']}/, figures/{problem['id']}/, and reports/{problem['id']}_RESULTS.md. Do not alter the scientific contract, input, accepted dependencies, or later problems. Resolve every required repair, rerun the primary and independent checks, regenerate candidate result/verification artifacts, and stop.
+    scope = _evidence_scope(evidence_paths)
+    return f"""Scientific review rejected candidate {problem['id']} with issue class {review['issue_class']}. Use this Host-owned evidence scope:
+{scope}
+
+Repair only code/{problem['id']}/, results/{problem['id']}/, figures/{problem['id']}/, and reports/{problem['id']}_RESULTS.md. Do not alter the scientific contract, input, accepted dependencies, or later problems. Resolve every required repair, rerun the primary and independent checks, regenerate candidate result/verification artifacts, and stop.
 
 Review evidence:
 {evidence}"""
@@ -1258,10 +1354,10 @@ Review evidence:
 
 def _evidence_scope(paths: list[str] | None) -> str:
     items = "\n".join(f"- {path}" for path in (paths or []))
-    return f"""Read only the following workspace evidence files; the Host assembled this complete allowlist from accepted lineage:
+    return f"""Use only the following workspace files; the Host assembled this complete allowlist for the current stage. Read every file needed to discharge the stage contract and skip only clearly irrelevant optional attachments:
 {items or '- None'}
 
-Do not inspect $MATHMODELAGENT_ROOT/pi/, tests/, other workspaces, superseded Method/Spike versions, validator implementations, or repository history. Do not use shell/search tools to discover additional context. Missing information must be reported rather than recovered from unlisted files."""
+Do not inspect Host implementation under $MATHMODELAGENT_ROOT/pi/*.py, tests/, other workspaces, unlisted superseded Method/Spike versions, validator implementations, or repository history. Read only skill/reference files explicitly named by this prompt. Do not use shell/search tools to discover additional context or run Git status/diff. Batch independent reads in one turn. Missing information must be reported rather than recovered from unlisted files."""
 
 
 def paper_planning_prompt(
@@ -1351,7 +1447,11 @@ def final_stage_prompt(
     evidence_paths: list[str] | None = None,
 ) -> str:
     if stage == "diagram":
-        return """Fully read $MATHMODELAGENT_ROOT/skills/4drawio/SKILL.md. Read only accepted reports/results and paper_plan.json. Create only conceptual diagrams that add scientific information and are explicitly useful to the paper; do not generate generic roadmaps, decorative architecture diagrams, or duplicate a data figure. Always write reports/DRAWIO_REPORT.md; if no conceptual diagram is needed, explain that there. Do not modify code or accepted results. Stop after this stage."""
+        scope = _evidence_scope(evidence_paths)
+        return f"""Fully read $MATHMODELAGENT_ROOT/skills/4drawio/SKILL.md and use this Host-owned evidence scope:
+{scope}
+
+Create only conceptual diagrams that add scientific information and are explicitly useful to the paper; do not generate generic roadmaps, decorative architecture diagrams, or duplicate a data figure. Always write reports/DRAWIO_REPORT.md; if no conceptual diagram is needed, explain that there. Do not modify code or accepted results. Stop after this stage."""
     if stage == "writing":
         scope = _evidence_scope(evidence_paths)
         return f"""Fully read $MATHMODELAGENT_ROOT/skills/5writing/SKILL.md and use this Host-owned evidence scope:
@@ -1379,7 +1479,11 @@ Compile a non-empty PDF under paper/. Also write paper/paper_manifest.json with 
 }}
 Every anchor must occur exactly once in its section and all six anchors must be distinct. The limitation anchor must identify a real limitation, not a model or conclusion phrase, and must not contain or be contained by another anchor. Every explicit `\\bibitem{{key}}` must be cited by at least one body `\\cite{{key}}`, and no body citation may reference an absent key. Do not include uncited background references. The key is exactly `figures`, not `figure_paths`. Stop after the PDF, manifest, and rendered-page inspection are complete."""
     if stage == "verify":
-        return """Act as the independent read-only Document Reviewer. Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md, paper_plan.json, paper/paper_manifest.json, accepted scientific reviews, frozen evidence, paper source, the existing compilation log, and every existing rendered PDF page. This current Host contract overrides any skill instruction to run commands or write a report: do not edit/create files, run compilation, render pages, or use shell commands.
+        scope = _evidence_scope(evidence_paths)
+        return """Act as the independent read-only Document Reviewer. Fully read $MATHMODELAGENT_ROOT/skills/6verity/SKILL.md and use this Host-owned evidence scope:
+""" + scope + """
+
+This current Host contract overrides any skill instruction to run commands or write a report: do not edit/create files, run compilation, render pages, or use shell commands.
 
 Confirm every accepted claim is substantively covered; all six manifest anchors per claim are unique and truthful; frozen evidence and paper numbers agree; required models, results, independent validations, sensitivity boundaries, conclusions, and limitations are present; every listed reference is cited and every citation resolves; the existing log/PDF establish successful compilation; and every rendered page is readable. For every figure, verify accepted provenance, paper-language labels, units, scales, legends, grayscale distinction, and absence of overlap or clipping. Confirm exactly one contents sequence and no unnecessary forced separation before a short reference list. Short page count alone is a warning, not a hard failure.
 

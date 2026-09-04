@@ -97,6 +97,9 @@ UPSTREAM_SKILLS = ROOT / "skills"
 PI_SKILLS = ROOT / "pi" / "skills"
 ENTRY_SKILL = PI_SKILLS / "mathmodelagent-pi" / "SKILL.md"
 TOOL_POLICY_EXTENSION = ROOT / "pi" / "tool_policy.ts"
+FIGURE_REFERENCE_CATALOG = (
+    PI_SKILLS / "mathmodel-figure-quality" / "references" / "figure-reference-catalog.json"
+)
 VENV_SCRIPTS = ROOT / ".venv-pi" / "Scripts"
 TASK_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
@@ -744,6 +747,7 @@ async def _start_project(
         competition=request.competition,
         language=request.language,
         notes=request.question.strip(),
+        evidence_paths=runtime._stage_context_paths(project),
     )
     runtime.runner = asyncio.create_task(runtime.run(prompt))
 
@@ -996,6 +1000,7 @@ class TaskRuntime:
         phase = self._current_phase(workflow) or {}
         errors = [str(phase.get("last_error") or "Interrupted by a user pause; recheck current artifacts before continuing.")]
         problem = self._problem(workflow)
+        context_paths = self._stage_context_paths(project)
         if mode == "inventory":
             return inventory_prompt(
                 problem_file=str(project["problem_file"]),
@@ -1003,13 +1008,15 @@ class TaskRuntime:
                 competition=str(project.get("competition") or "CUMCM"),
                 language=str(project.get("language") or "Chinese"),
                 notes="",
+                evidence_paths=context_paths,
             )
         if mode == "inventory_audit":
-            return inventory_audit_prompt(self._inventory(workflow))
+            return inventory_audit_prompt(self._inventory(workflow), context_paths)
         if mode == "inventory_revision":
             return inventory_revision_prompt(
                 workflow.get("last_review") or {},
                 int(workflow.get("inventory_version") or 1),
+                context_paths,
             )
         if mode in {"method_proposal", "method_revision", "evidence_downgrade"}:
             problem_id = self._phase_problem_id(workflow)
@@ -1018,14 +1025,26 @@ class TaskRuntime:
                 version = self._proposal_version(workflow)
                 if mode == "method_proposal":
                     return method_proposal_prompt(
-                        inventory, problem_id, version, canonical_hash(inventory)
+                        inventory,
+                        problem_id,
+                        version,
+                        canonical_hash(inventory),
+                        context_paths,
                     )
                 if mode == "evidence_downgrade":
                     return evidence_downgrade_prompt(
-                        inventory, problem_id, version, workflow.get("last_review") or {}
+                        inventory,
+                        problem_id,
+                        version,
+                        workflow.get("last_review") or {},
+                        context_paths,
                     )
                 return method_revision_prompt(
-                    inventory, problem_id, version, workflow.get("last_review") or {}
+                    inventory,
+                    problem_id,
+                    version,
+                    workflow.get("last_review") or {},
+                    context_paths,
                 )
         if mode == "feasibility_spike":
             card = self._method_card(workflow)
@@ -1041,6 +1060,7 @@ class TaskRuntime:
                     card,
                     supplemental=bool(workflow.get("supplemental_spike")),
                     supplemental_ids=list(workflow.get("supplemental_spike_ids") or []),
+                    evidence_paths=context_paths,
                 )
         if mode == "method_audit":
             card = self._method_card(workflow)
@@ -1058,15 +1078,23 @@ class TaskRuntime:
                     item for item in self._inventory(workflow)["problems"]
                     if item["id"] == card["problem_id"]
                 )
-                return method_audit_prompt(inventory_problem, card, spike)
+                return method_audit_prompt(
+                    inventory_problem, card, spike, context_paths
+                )
         if mode == "plan_audit":
-            return plan_audit_prompt()
+            return plan_audit_prompt(context_paths)
         if mode == "plan_revision":
-            return plan_revision_prompt(workflow.get("last_review") or {})
+            return plan_revision_prompt(workflow.get("last_review") or {}, context_paths)
         if mode == "scientific_review" and problem:
-            return scientific_review_prompt(problem)
+            return scientific_review_prompt(
+                problem,
+                context_paths,
+                self._figure_reference_context(problem),
+            )
         if mode == "scientific_repair" and problem:
-            return scientific_repair_prompt(problem, workflow.get("last_review") or {})
+            return scientific_repair_prompt(
+                problem, workflow.get("last_review") or {}, context_paths
+            )
         if mode == "method_replan" and problem:
             plan = workflow.get("replan_base") or validate_execution_plan(self.workspace)
             ids = [item["id"] for item in plan["problems"]]
@@ -1552,6 +1580,129 @@ class TaskRuntime:
         problem_id = current.split(":", 1)[1]
         return next((item for item in plan["problems"] if item["id"] == problem_id), None)
 
+    def _stage_context_paths(self, project: dict[str, Any]) -> list[str]:
+        """Return only the workspace files relevant to the current stage."""
+        workflow = project["workflow"]
+        stage = str(workflow.get("current") or "")
+        mode = str(workflow.get("mode") or "run")
+        paths = {str(project.get("problem_file") or ""), "input_manifest.json"}
+
+        def add_tree(relative: str) -> None:
+            root = self.workspace / relative
+            if root.is_file():
+                paths.add(relative)
+            elif root.is_dir():
+                paths.update(
+                    path.relative_to(self.workspace).as_posix()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                )
+
+        if stage in {"inventory", "inventory_audit", "planning", "plan_audit"}:
+            add_tree("input")
+        if stage == "inventory":
+            version = int(workflow.get("inventory_version") or 1)
+            if mode == "inventory_revision" and version > 1:
+                paths.update({
+                    f"planning/inventory/v{version - 1}/problem_inventory.json",
+                    f"reports/PROBLEM_INVENTORY_v{version - 1}.md",
+                })
+        elif stage == "inventory_audit":
+            version = int(workflow.get("inventory_version") or 1)
+            paths.update({
+                f"planning/inventory/v{version}/problem_inventory.json",
+                f"reports/PROBLEM_INVENTORY_v{version}.md",
+            })
+
+        card = self._method_card(workflow)
+        problem = self._problem(workflow) or ((card or {}).get("problem"))
+        if problem is None and stage.startswith("method:"):
+            problem_id = stage.split(":", 1)[1]
+            problem = next(
+                (
+                    item
+                    for item in self._inventory(workflow).get("problems", [])
+                    if item.get("id") == problem_id
+                ),
+                None,
+            )
+        if isinstance(problem, dict):
+            paths.update(str(path) for path in problem.get("inputs", problem.get("input_paths", [])))
+            dependencies = problem.get("depends_on") or []
+            frozen = workflow.get("frozen") or {}
+            for dependency in dependencies:
+                artifacts = frozen.get(dependency)
+                if isinstance(artifacts, dict):
+                    paths.update(str(path) for path in artifacts)
+
+        problem_id = self._phase_problem_id(workflow)
+        if stage.startswith("method:") and problem_id:
+            version = self._proposal_version(workflow)
+            if mode in {"method_revision", "evidence_downgrade"} and version > 1:
+                add_tree(f"planning/methods/{problem_id}/v{version - 1}")
+                paths.add(f"reports/{problem_id}_METHOD_v{version - 1}.md")
+        if (
+            workflow.get("contract_version") == 3
+            and problem_id
+            and stage.startswith(("spike:", "method_audit:", "problem:"))
+        ):
+            entry = (self._ledger().get("problems") or {}).get(problem_id) or {}
+            for field in ("method_card", "method_report", "method_audit"):
+                record = entry.get(field) or {}
+                if isinstance(record, dict):
+                    paths.add(str(record.get("path") or ""))
+            for field in ("spike", "supplemental_spike"):
+                record = entry.get(field) or {}
+                if isinstance(record, dict):
+                    paths.update(str(path) for path in (record.get("artifact_sha256") or {}))
+
+        if stage.startswith("problem:"):
+            paths.update({"execution_plan.json", "reports/ANALYSIS_MODELING_REPORT.md"})
+            if mode in {"scientific_review", "scientific_repair", "candidate_repair", "direct_repair"} and problem_id:
+                paths.update(artifact_hashes(self.workspace, problem_id))
+        elif stage == "planning" and mode == "plan_revision":
+            paths.update({"execution_plan.json", "reports/ANALYSIS_MODELING_REPORT.md"})
+        elif stage == "plan_audit":
+            paths.update({"execution_plan.json", "reports/ANALYSIS_MODELING_REPORT.md"})
+        elif stage == "diagram":
+            paths.update(self._paper_context_paths(project, writing=False))
+            paths.update({"paper_plan.json", "reports/PAPER_PLAN.md"})
+            add_tree("figures")
+
+        return sorted(
+            path for path in paths if path and (self.workspace / path).is_file()
+        )
+
+    def _figure_reference_context(
+        self, problem: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        selected = {
+            str(spec.get("reference_id") or "")
+            for spec in (problem or {}).get("figure_specs", [])
+        }
+        if not selected:
+            return []
+        catalog = json.loads(FIGURE_REFERENCE_CATALOG.read_text(encoding="utf-8"))
+        return [
+            entry for entry in catalog["references"] if entry.get("id") in selected
+        ]
+
+    def _document_review_context_paths(self, project: dict[str, Any]) -> list[str]:
+        paths = set(self._paper_context_paths(project, writing=True))
+        paper_root = self.workspace / "paper"
+        if paper_root.is_dir():
+            paths.update(
+                path.relative_to(self.workspace).as_posix()
+                for path in paper_root.rglob("*")
+                if path.is_file()
+                and (
+                    "rendered_pages" in path.parts
+                    or path.suffix.lower()
+                    in {".tex", ".typ", ".bib", ".json", ".log", ".pdf"}
+                )
+            )
+        return sorted(paths)
+
     def _paper_context_paths(
         self, project: dict[str, Any], *, writing: bool
     ) -> list[str]:
@@ -1654,6 +1805,13 @@ class TaskRuntime:
         workflow = project["workflow"]
         stage = str(workflow["current"])
         mode = str(workflow.get("mode") or "run")
+        if mode in {
+            "plan_audit",
+            "plan_revision",
+            "scientific_review",
+            "scientific_repair",
+        }:
+            return self._resume_prompt(project)
         if workflow.get("contract_version") == 3:
             if mode in {
                 "inventory", "inventory_audit", "inventory_revision", "method_proposal",
@@ -1669,7 +1827,7 @@ class TaskRuntime:
                 notes="",
             )
         if stage == "plan_audit":
-            return plan_audit_prompt()
+            return plan_audit_prompt(self._stage_context_paths(project))
         if stage == "paper_planning":
             plan = validate_execution_plan(self.workspace)
             return paper_planning_prompt(
@@ -1678,7 +1836,11 @@ class TaskRuntime:
             )
         problem = self._problem(workflow)
         if problem:
-            return problem_prompt(problem)
+            return problem_prompt(
+                problem,
+                self._stage_context_paths(project),
+                self._figure_reference_context(problem),
+            )
         return final_stage_prompt(
             stage,
             competition=str(project.get("competition") or "CUMCM"),
@@ -1687,6 +1849,10 @@ class TaskRuntime:
             evidence_paths=(
                 self._paper_context_paths(project, writing=True)
                 if stage == "writing"
+                else self._stage_context_paths(project)
+                if stage == "diagram"
+                else self._document_review_context_paths(project)
+                if stage == "verify"
                 else None
             ),
         )
@@ -2157,7 +2323,7 @@ class TaskRuntime:
         try:
             await self._switch_session("planner")
             await self.system("Sol 正在独立审查执行计划")
-            await self.prompt(plan_audit_prompt())
+            await self.prompt(self._prompt_for_current(self._project()))
         except Exception as exc:
             await self._wait_with_errors([f"rpc_error: plan audit failed: {exc}"])
 
@@ -2197,7 +2363,7 @@ class TaskRuntime:
             try:
                 await self._switch_session("planner")
                 await self.system("计划审查未通过，Sol 正在执行一次完整修订", "warning")
-                await self.prompt(plan_revision_prompt(review))
+                await self.prompt(self._prompt_for_current(self._project()))
             except Exception as exc:
                 await self._wait_with_errors([f"rpc_error: plan revision failed: {exc}"])
             return
@@ -2219,7 +2385,7 @@ class TaskRuntime:
         try:
             await self._switch_session("planner")
             await self.system(f"Sol 正在独立科学审查 {problem['id']}")
-            await self.prompt(scientific_review_prompt(problem))
+            await self.prompt(self._prompt_for_current(self._project()))
         except Exception as exc:
             await self._wait_with_errors([f"rpc_error: scientific review failed: {exc}"])
 
@@ -2310,7 +2476,7 @@ class TaskRuntime:
         try:
             await self._switch_session("worker")
             await self.system(f"Luna 正在按修订后的计划重做 {problem['id']}")
-            await self.prompt(problem_prompt(self._problem(workflow) or problem))
+            await self.prompt(self._prompt_for_current(self._project()))
         except Exception as exc:
             await self._wait_with_errors([f"rpc_error: revised execution failed: {exc}"])
 
@@ -2403,7 +2569,7 @@ class TaskRuntime:
                 await self.system(
                     f"Luna 正在修复 {problem['id']} 的科学审查问题", "warning"
                 )
-                await self.prompt(scientific_repair_prompt(problem, review))
+                await self.prompt(self._prompt_for_current(self._project()))
             except Exception as exc:
                 await self._wait_with_errors([f"rpc_error: scientific repair failed: {exc}"])
             return
@@ -2636,7 +2802,7 @@ class TaskRuntime:
                 if protocol_attempts < 2:
                     self._save_project(project)
                     await self._switch_session("planner")
-                    await self.prompt(inventory_audit_prompt(self._inventory(workflow)))
+                    await self.prompt(self._prompt_for_current(self._project()))
                 else:
                     await self._wait_with_errors([f"review_protocol: {exc}"])
                 return
@@ -2681,7 +2847,7 @@ class TaskRuntime:
             workflow.pop("pending_transition", None)
             self._save_project(project)
             await self._switch_session("planner")
-            await self.prompt(inventory_revision_prompt(review, new_version))
+            await self.prompt(self._prompt_for_current(self._project()))
             return
         await self._wait_with_errors([f"inventory_rejected: {issue}" for issue in review["issues"]])
 
@@ -2966,11 +3132,7 @@ class TaskRuntime:
             workflow.pop("pending_transition", None)
             self._save_project(project)
             await self._switch_session("worker")
-            await self.prompt(spike_prompt(
-                card,
-                supplemental=True,
-                supplemental_ids=review["supplemental_spike_ids"],
-            ))
+            await self.prompt(self._prompt_for_current(self._project()))
             return
         audits = int(phase.get("attempts") or 1)
         if audits < 3:
@@ -3046,7 +3208,7 @@ class TaskRuntime:
                 workflow["stage_snapshot"] = workspace_hashes(self.workspace)
                 self._save_project(project)
                 await self._switch_session("planner")
-                await self.prompt(inventory_revision_prompt(synthetic, workflow["inventory_version"]))
+                await self.prompt(self._prompt_for_current(self._project()))
             else:
                 assert artifact is not None
                 await self._complete_current(project, artifact)
