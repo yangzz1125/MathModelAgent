@@ -775,7 +775,8 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("results/q3/unrelated.json", method_paths)
             self.assertNotIn("planning/methods/q9/v1/method_card.json", method_paths)
             method_prompt = runtime._prompt_for_current(project)
-            self.assertIn("Host assembled this complete allowlist", method_prompt)
+            self.assertIn("Host-selected stage context", method_prompt)
+            self.assertIn("not a filesystem access-control boundary", method_prompt)
             self.assertIn("results/q1/accepted.json", method_prompt)
             self.assertIn("figure-reference-catalog.json", method_prompt)
             self.assertIn("Do not inspect Host implementation", method_prompt)
@@ -2539,7 +2540,7 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Document Reviewer modified", saved["workflow"]["phases"][-1]["last_error"])
             self.assertFalse((runtime.workspace / "reports" / "VERIFY_REPORT.md").exists())
 
-    async def test_paper_context_uses_host_allowlist_without_old_planning(self) -> None:
+    async def test_paper_context_uses_host_stage_context_without_old_planning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._workspace(directory, at_problem=True)
             self._candidate(runtime)
@@ -2571,7 +2572,8 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("reports/DRAWIO_REPORT.md", writer_paths)
             project["workflow"].update({"current": "paper_planning", "mode": "run"})
             planner_prompt = runtime._prompt_for_current(project)
-            self.assertIn("Host assembled this complete allowlist", planner_prompt)
+            self.assertIn("Host-selected stage context", planner_prompt)
+            self.assertIn("not a filesystem access-control boundary", planner_prompt)
             self.assertIn("results/q1/result.json", planner_prompt)
             self.assertNotIn("planning/methods/q1/v1", planner_prompt)
             self.assertNotIn("skills/5writing/SKILL.md", planner_prompt)

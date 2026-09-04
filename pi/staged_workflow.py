@@ -1370,7 +1370,7 @@ Review evidence:
 
 def _evidence_scope(paths: list[str] | None) -> str:
     items = "\n".join(f"- {path}" for path in (paths or []))
-    return f"""Use only the following workspace files; the Host assembled this complete allowlist for the current stage. Read every file needed to discharge the stage contract and skip only clearly irrelevant optional attachments:
+    return f"""Use the following Host-selected stage context. This list guides relevance and performance; it is not a filesystem access-control boundary. Read every listed file needed to discharge the stage contract and skip only clearly irrelevant optional attachments:
 {items or '- None'}
 
 Do not inspect Host implementation under $MATHMODELAGENT_ROOT/pi/*.py, tests/, other workspaces, unlisted superseded Method/Spike versions, validator implementations, or repository history. Read only skill/reference files explicitly named by this prompt. Do not use shell/search tools to discover additional context or run Git status/diff. Batch independent reads in one turn. Missing information must be reported rather than recovered from unlisted files."""
