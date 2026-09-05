@@ -742,6 +742,8 @@ async def _start_project(
         "problems": {},
         "plan_version": 0,
     })
+    from pi.paper_layout import paper_layout_policy
+    workflow["paper_layout"] = paper_layout_policy(project)
     workflow["phases"][0]["started_at"] = runtime.started_at
     workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
     project.update(
@@ -2126,6 +2128,9 @@ class TaskRuntime:
             errors.append("performance_budget: command exceeded runtime_limit_seconds")
             self._budget_exceeded = False
         plan = None
+        if stage in {"writing", "verify"}:
+            from pi.paper_layout import paper_layout_errors
+            errors.extend(paper_layout_errors(self.workspace, workflow.get("paper_layout")))
         if stage == "inventory":
             version = int(workflow.get("inventory_version") or 1)
             report = self.workspace / "reports" / f"PROBLEM_INVENTORY_v{version}.md"
