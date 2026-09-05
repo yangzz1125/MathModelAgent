@@ -1094,18 +1094,25 @@ def validate_paper_plan(
     }
 
 
-def paper_source_errors(workspace: Path, *, legacy_visual: bool = True) -> list[str]:
+def paper_source_errors(
+    workspace: Path, *, legacy_visual: bool = True, strict: bool = False,
+) -> list[str]:
     """Check explicit LaTeX references and obvious page-padding constructs."""
     paper = workspace / "paper"
-    sources = sorted(paper.rglob("*.tex")) if paper.is_dir() else []
-    if not sources:
-        return []
-    text = "\n".join(
-        re.sub(r"(?<!\\)%.*$", "", line)
-        for path in sources
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-    )
-    errors: list[str] = []
+    if strict:
+        if not (paper / "main.tex").is_file():
+            return []
+        sources, source_errors = _reachable_paper_sources(paper, [paper / "main.tex"])
+        text = "\n".join(sources.values())
+        errors = [f"paper_sources: {error}" for error in source_errors]
+    else:
+        paths = sorted(paper.rglob("*.tex")) if paper.is_dir() else []
+        text = "\n".join(
+            re.sub(r"(?<!\\)%.*$", "", line)
+            for path in paths
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        )
+        errors = []
     bibliography_keys = re.findall(
         r"\\bibitem(?:\s*\[[^\]]*\])?\s*\{([^{}\s]+)\}", text
     )
@@ -1169,10 +1176,9 @@ def paper_source_errors(workspace: Path, *, legacy_visual: bool = True) -> list[
     return errors
 
 
-def _paper_figure_errors(workspace: Path, paper_plan: dict[str, Any], sections: list[str]) -> list[str]:
-    paper = workspace / "paper"
-    master = paper / ("main.tex" if (paper / "main.tex").is_file() else "main.typ")
-    pending = [master] if master.is_file() else [workspace / section for section in sections]
+def _reachable_paper_sources(
+    paper: Path, pending: list[Path],
+) -> tuple[dict[Path, str], list[str]]:
     sources: dict[Path, str] = {}
     errors: list[str] = []
     while pending:
@@ -1195,7 +1201,16 @@ def _paper_figure_errors(workspace: Path, paper_plan: dict[str, Any], sections: 
                     raise ValueError(f"unresolved literal paper source: {name}")
                 pending.append(child)
         except (OSError, ValueError) as exc:
-            errors.append(f"paper_figures: {exc}")
+            errors.append(str(exc))
+    return sources, errors
+
+
+def _paper_figure_errors(workspace: Path, paper_plan: dict[str, Any], sections: list[str]) -> list[str]:
+    paper = workspace / "paper"
+    master = paper / ("main.tex" if (paper / "main.tex").is_file() else "main.typ")
+    pending = [master] if master.is_file() else [workspace / section for section in sections]
+    sources, source_errors = _reachable_paper_sources(paper, pending)
+    errors = [f"paper_figures: {error}" for error in source_errors]
     search_roots = [paper]
     for text in sources.values():
         for group in re.findall(r"\\graphicspath\s*\{((?:\s*\{[^{}]+\})+\s*)\}", text):

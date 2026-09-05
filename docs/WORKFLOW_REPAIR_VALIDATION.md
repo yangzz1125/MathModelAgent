@@ -34,6 +34,16 @@ The final full suite passed all 127 tests in 32.469 seconds. compileall, pip che
 
 Other checks cover terminal integrity handling across repair routes, aggregated Paper Plan list-type errors, forbidden audit evidence, paper-local figure substitution even when the manifest names the original, missing/tampered Host page evidence, prompt contradictions, exhausted Spike repair budgets, the status API's candidate repair count, and pause during Host rendering.
 
+## Paper Continuation Follow-up (2026-09-05)
+
+Program-owned continuation `054ac51c59c3` generated an eight-page, 229001-byte PDF, but terminated at Writing. An initial compiler invocation from the workspace root left `texput.log` outside the stage boundary. The reference gate also incorrectly scanned an unused template chapter containing `dantzig1963`.
+
+All Writing entry/repair prompts now share an explicit workspace-root build contract: enter paper/, check the master exists, and compile twice in the same fail-fast shell call. This is producer guidance, not a compiler sandbox; Host write-boundary rejection remains unchanged. The manifest prompt also names the literal `plan_version` key unambiguously.
+
+Strict v3 reference/layout validation now reuses the figure validator's reachable literal source traversal from main.tex. Unused template chapters are excluded; reachable bad citations, missing includes, and paths outside paper/ remain errors. Legacy v1/v2 behavior is unchanged. Checking the preserved continuation with this corrected source gate produces no reference errors, but its historical integrity failure is not erased.
+
+The full suite passed 134 tests in 39.045 seconds, including a real two-pass XeLaTeX build, missing-master prevention, write-boundary rejection, nested/cyclic includes, unreachable-template exclusion, and reachable bad-citation rejection. The existing PDF preview returned HTTP 200 with application/pdf. No real Document Reviewer acceptance or additional model continuation is claimed.
+
 ## Boundaries And Compatibility
 
 - No failed historical workspace is resumed or migrated; no scientific verdict or frozen hash is manually accepted in a real task.

@@ -2111,6 +2111,7 @@ class TaskRuntime:
                     errors.extend(paper_source_errors(
                         self.workspace,
                         legacy_visual=workflow.get("contract_version") == 2,
+                        strict=workflow.get("contract_version") == 3,
                     ))
                 except (ContractError, ScientificContractError) as exc:
                     errors.append(f"validation_failed: {exc}")

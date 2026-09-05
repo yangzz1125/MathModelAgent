@@ -1495,9 +1495,18 @@ Gate evidence:
 {details}"""
 
 
+PAPER_BUILD_CONTRACT = """Paper build working-directory contract (overrides bare compiler commands in skills):
+Every bash call starts at the workspace root; a previous call's cd does not persist. Keep all source, logs, auxiliary files, and temporary previews under paper/. For LaTeX use this complete command in a single bash call:
+(cd paper && test -f main.tex && xelatex -interaction=nonstopmode -halt-on-error main.tex && xelatex -interaction=nonstopmode -halt-on-error main.tex)
+For Typst use: (cd paper && test -f main.typ && typst compile --root .. main.typ main.pdf)
+Do not run a bare compiler at the workspace root or rely on an earlier cd. The file check must succeed before compiling; stop that command on failure. Do not delete outside-boundary files to conceal a failed command; report any such write to the Host. Validate citations and layout from main.tex and its reachable input/include files, not unused template chapters. Shell success is not proof of a passing check: use fail-fast commands so a later pdfinfo or search cannot mask a failed assertion."""
+
+
 def paper_manifest_repair_prompt(errors: list[str]) -> str:
     details = "\n".join(f"- {error}" for error in errors)
     return f"""The Host rejected the paper or paper/paper_manifest.json. Repair only paper/. Do not modify accepted evidence or paper_plan.json. Fix every gate error, compile the PDF twice, and stop.
+
+{PAPER_BUILD_CONTRACT}
 
 The manifest must use exactly this coverage-entry shape (repeat once per paper-plan claim):
 {{
@@ -1530,7 +1539,8 @@ def repair_prompt(stage: str, errors: list[str]) -> str:
 Gate evidence:
 {details}
 
-Fix the root cause, rerun the smallest relevant check, regenerate the current stage artifacts, and stop."""
+Fix the root cause, rerun the smallest relevant check, regenerate the current stage artifacts, and stop.
+{PAPER_BUILD_CONTRACT if stage == 'writing' else ''}"""
 
 
 def review_prompt(problem: dict[str, Any], errors: list[str]) -> str:
@@ -1551,6 +1561,8 @@ def writing_repair_prompt(errors: list[str], repair_number: int = 1) -> str:
     return f"""The independent verification stage rejected the paper. This is bounded writing repair {repair_number} of 2. Repair only paper/. Read the complete reports/VERIFY_REPORT.md and the evidence below. Do not modify input/, execution_plan.json, code/, results/, figures/, or accepted problem reports.
 
 {details}
+
+{PAPER_BUILD_CONTRACT}
 
 Fix every item under the report's hard-error and required-repairs sections, including truthful manifest anchors. Preserve accepted numbers and embed only the accepted frozen vector master; never create a repaired/replotted figure under paper/ or substitute it for frozen provenance. For each paper-layout defect, edit the paper source, compile twice, render temporary previews if needed, inspect the exact failed pages, and iterate within this repair turn until all cited labels, axes, legends, tables, and margins are visibly separated and unclipped. The Host will replace `paper/rendered_pages/` with authoritative color and grayscale renders from the final PDF before Verify; do not treat stale producer renders as evidence. If the defect exists inside a frozen accepted figure rather than paper layout, report that it cannot be repaired in paper/; do not fabricate replacement evidence. Use the paper language for chart prose. Confirm all manifest anchors are unique, semantically correct literal substrings before stopping. Confirm every explicit bibliography item is cited in the body and every citation resolves. Remove duplicate contents pages, consecutive forced page breaks, and forced separation before a short reference list. Use TEST as a neutral control number only when the problem supplied none. Do not run verification or write VERIFY_REPORT.md yourself."""
 
@@ -1574,13 +1586,15 @@ Create only conceptual diagrams that add scientific information and are explicit
         return f"""Fully read $MATHMODELAGENT_ROOT/skills/5writing/SKILL.md and use this Host-owned evidence scope:
 {scope}
 
+{PAPER_BUILD_CONTRACT}
+
 Write the complete {language} {competition} paper using {paper_engine}. Cover every paper-plan claim with its model/equations, algorithm and stopping rule, result evidence, independent validation, sensitivity/robustness, conclusion, and disclosed limitations. Use only accepted frozen evidence for numerical claims; do not recompute, invent values, redraw data, pad length, or omit evidence because a section is short. Shell commands are for compiling, rendering, and validating the paper only, never repository discovery.
 
 Fully cover every claim, but keep the paper proportional to the problem. Treat recommended_page_range as soft guidance: remove repeated claim-template prose, duplicate contents pages, unnecessary forced page breaks, oversized spacing, excessive precision, and unused diagrams before adding pages. Keep exactly one table of contents. Let a short reference list follow the body naturally instead of forcing it onto a new page. Keep enough derivation and evidence to make each conclusion auditable.
 
 Every chart's prose labels, axis titles, legends, and annotations must use {language}; mathematical symbols may remain standard. Embed the accepted frozen vector master declared by its figure provenance. Do not rebuild a chart in paper/. Keep labels visibly separated from ticks, curves, axes boundaries, and each other. Compile twice and inspect temporary page previews for clipping, overlap, blank pages, figure provenance fidelity, grayscale readability, and incoherent whitespace. After this stage settles, the Host will replace `paper/rendered_pages/` with authoritative color and grayscale renders derived from every physical page of the final PDF and bind them to its hash before Verify.
 
-Compile a non-empty PDF under paper/. Also write paper/paper_manifest.json with exactly these top-level fields: schema_version=1, active plan_version, and coverage. coverage must contain exactly one object per paper-plan claim with this shape:
+Compile a non-empty PDF under paper/. Also write paper/paper_manifest.json with exactly these top-level fields: schema_version=1, plan_version (the active plan version number), and coverage. coverage must contain exactly one object per paper-plan claim with this shape:
 {{
   "claim_id": "exact claim id",
   "section_file": "paper/relative-section-file.tex",
