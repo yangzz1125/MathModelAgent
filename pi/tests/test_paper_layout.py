@@ -11,7 +11,8 @@ from pi.paper_layout import LAYOUT_SOURCE, LAYOUT_SOURCES, LAYOUT_VERSION, paper
 from pi.scientific_review import paper_source_errors
 from pi.staged_workflow import PAPER_LAYOUT_CONTRACT, final_stage_prompt, paper_manifest_repair_prompt, repair_prompt, writing_repair_prompt
 
-MASTER = r"""\documentclass[a4paper,12pt]{ctexart}
+# Use the installed open TeX font set, not optional Windows SimHei/SimSun fonts.
+MASTER = r"""\documentclass[a4paper,12pt,fontset=fandol]{ctexart}
 \input{cumcm-layout.tex}
 \begin{document}
 \papertitle{Layout regression}
@@ -69,7 +70,7 @@ class PaperLayoutTest(unittest.TestCase):
             (paper / "main.tex").write_text(content)
             shutil.copyfile(LAYOUT_SOURCE, paper / "cumcm-layout.tex")
             result = subprocess.run(["xelatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=paper, capture_output=True, timeout=60)
-            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace")[-2000:])
             log = (paper / "main.log").read_text(errors="replace")
             values = re.search(r"ABSTRACTWIDTH=([\d.]+)pt; TEXTWIDTH=([\d.]+)pt; INDENT=([\d.]+)pt;\s*SIZE=([\d.]+)", log)
             self.assertIsNotNone(values, log[-2000:])

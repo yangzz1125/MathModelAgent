@@ -48,6 +48,11 @@ def render_paper_pages(
     workspace: Path, pdf: Path, *, cancelled: Callable[[], bool] = lambda: False
 ) -> dict[str, Any]:
     """Called by the Host only, after the Writing gate and before Reviewer snapshots."""
+    # Windows 8.3 aliases and relative roots must use the same canonical form.
+    # Retain the containment check before reading or rendering any PDF.
+    workspace = workspace.resolve()
+    pdf = pdf.resolve()
+    pdf.relative_to(workspace)
     pdfinfo, renderer = shutil.which("pdfinfo"), shutil.which("pdftoppm")
     if not pdfinfo or not renderer:
         raise ValueError("pdfinfo and pdftoppm are required for Host page evidence")
