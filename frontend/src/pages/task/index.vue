@@ -1,314 +1,261 @@
 <script setup lang="ts">
-import { getTaskStatus } from "@/apis/commonApi";
-import CoderEditor from "@/components/AgentEditor/CoderEditor.vue";
-import ChatArea from "@/components/ChatArea.vue";
-import PaperPreview from "@/components/PaperPreview.vue";
-import WorkflowPanel from "@/components/WorkflowPanel.vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
+import { File, Download } from "lucide-vue-next";
+import Skeleton from "@/components/ui/skeleton/Skeleton.vue";
 import { Button } from "@/components/ui/button";
-import {
-	ResizableHandle,
-	ResizablePanel,
-	ResizablePanelGroup,
-} from "@/components/ui/resizable";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import FilesSheet from "@/pages/task/components/FileSheet.vue";
+import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
+import PaperPreview from "@/components/PaperPreview.vue";
+import FileManager from "@/components/FileManager.vue";
+import Main from "@/components/Main.vue";
+import AppHeader from "@/components/AppHeader.vue";
+import WorkflowPanel from "@/components/WorkflowPanel.vue";
+import { useFileStore } from "@/stores/file";
 import { useTaskStore } from "@/stores/task";
-import {
-	Download,
-	FileText,
-	MessageSquare,
-	Pause,
-	Play,
-	Square,
-	Workflow,
-	Wrench,
-} from "lucide-vue-next";
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { useProjectStore } from "@/stores/project";
+import { toast } from "vue-sonner";
+import { isAcceptedDelivery } from "@/utils/deliveryStatus";
+import { getTaskFiles, getTaskStatus, downloadAllFiles, type TaskStatus } from "@/apis/commonApi";
+import { getProject, resumeTask, startProject } from "@/apis/submitModelingApi";
 
-// ---- Props ----
-
-const props = defineProps<{ task_id: string }>();
-
-// ---- Reactive State ----
-
+const route = useRoute();
+const fileStore = useFileStore();
 const taskStore = useTaskStore();
+const projectStore = useProjectStore();
+const runtime = ref<TaskStatus.Response | null>(null);
+const starting = ref(false);
+const loadingProject = ref(true);
+const isDownloading = ref(false);
+const selectedTab = ref("files");
+const rightPanelCollapsed = ref(false);
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
-/** 运行时长相关状态 */
-const startTime = ref<number>(Date.now());
-const runtime = ref<Awaited<ReturnType<typeof getTaskStatus>>["data"] | null>(null);
-let disposed = false;
-let refreshing = false;
-const currentTime = ref<number>(Date.now());
-let timer: ReturnType<typeof setInterval> | null = null;
+const taskId = computed(() => route.params.id as string);
+const isReady = computed(() => projectStore.project?.id === taskId.value && projectStore.project.status === "ready");
+const canResume = computed(() => runtime.value?.can_resume === true);
+const paperEngine = computed(() => {
+	const engine = projectStore.project?.id === taskId.value
+		? projectStore.project.paper_engine
+		: undefined;
+	return engine || fileStore.taskFiles?.paper_engine || "LaTeX";
+});
+const hasStartedWorkflow = computed(() => !isReady.value && !!runtime.value?.contract_version);
 
-/** 格式化运行时长为可读字符串 */
-const formatDuration = (ms: number): string => {
-	const seconds = Math.floor(ms / 1000);
-	const hours = Math.floor(seconds / 3600);
-	const minutes = Math.floor((seconds % 3600) / 60);
-	const remainingSeconds = seconds % 60;
-
-	if (hours > 0) {
-		return `${hours}h ${minutes}m ${remainingSeconds}s`;
-	}
-	if (minutes > 0) {
-		return `${minutes}m ${remainingSeconds}s`;
-	}
-	return `${remainingSeconds}s`;
-};
-
-/** 运行时长显示值 */
-const runningDuration = ref<string>("0s");
-
-/** 是否正在请求任务操作 */
-const isStopping = ref(false);
-const isPausing = ref(false);
-const isResuming = ref(false);
-const isPaused = ref(false);
-
-/** 更新运行时长 */
-const updateDuration = () => {
-	currentTime.value = Date.now();
-	runningDuration.value = formatDuration(currentTime.value - startTime.value);
-};
-
-/** 处理停止运行 */
-async function handleStop() {
-	isStopping.value = true;
-	await taskStore.stopTask(props.task_id);
-	isStopping.value = false;
-}
-
-/** 持久化暂停。 */
-async function handlePause() {
-	isPausing.value = true;
-	const result = await taskStore.pauseTask(props.task_id);
-	if (result.success) isPaused.value = true;
-	isPausing.value = false;
-}
-
-/** 从当前持久化阶段恢复。 */
-async function handleResume() {
-	isResuming.value = true;
-	const result = await taskStore.resumeTask(props.task_id);
-	if (result.success) isPaused.value = false;
-	isResuming.value = false;
-}
-
-/** 页面统一轮询，切换标签页不会停止状态更新。 */
-async function refreshStatus() {
-	if (refreshing || disposed) return;
-	refreshing = true;
+async function refreshFiles() {
+	if (!taskId.value) return;
 	try {
-		const { data } = await getTaskStatus(props.task_id);
-		if (disposed) return;
-		runtime.value = data;
-		isPaused.value = data.status === "paused";
-		taskStore.setRuntimeStatus(data.status, data.contract_version);
+		const files = await getTaskFiles(taskId.value);
+		fileStore.setTaskFiles(files);
 	} catch (error) {
-		console.error("获取任务状态失败:", error);
-	} finally {
-		refreshing = false;
+		console.warn("refresh files failed:", error);
 	}
 }
 
-// ---- Lifecycle Hooks ----
+async function refreshRuntime() {
+	if (!taskId.value) return;
+	try {
+		runtime.value = await getTaskStatus(taskId.value);
+		projectStore.project = await getProject(taskId.value);
+	} catch (error) {
+		console.warn("refresh runtime failed:", error);
+	}
+}
+
+async function initTask() {
+	const id = taskId.value;
+	if (!id) return;
+	loadingProject.value = true;
+	fileStore.setTaskFiles(null);
+	runtime.value = null;
+	selectedTab.value = "files";
+	try {
+		projectStore.project = await getProject(id);
+		if (!isReady.value) {
+			taskStore.switchTask(id);
+		}
+		await Promise.all([refreshFiles(), refreshRuntime()]);
+	} finally {
+		loadingProject.value = false;
+	}
+}
+
+async function startCurrentProject() {
+	if (!taskId.value || starting.value) return;
+	starting.value = true;
+	try {
+		const options = projectStore.settings();
+		const response = await startProject(taskId.value, options);
+		projectStore.project = await getProject(taskId.value);
+		taskStore.switchTask(response.task_id);
+		await Promise.all([refreshFiles(), refreshRuntime()]);
+		toast.success("程序已开始建模");
+	} catch (error: any) {
+		toast.error(error.response?.data?.detail || error.message || "启动失败");
+	} finally {
+		starting.value = false;
+	}
+}
+
+async function resumeCurrentTask() {
+	if (!taskId.value || starting.value) return;
+	starting.value = true;
+	try {
+		await resumeTask(taskId.value);
+		taskStore.switchTask(taskId.value);
+		await Promise.all([refreshFiles(), refreshRuntime()]);
+		toast.success("已恢复任务");
+	} catch (error: any) {
+		toast.error(error.response?.data?.detail || error.message || "恢复失败");
+	} finally {
+		starting.value = false;
+	}
+}
+
+async function handleDownloadAll() {
+	if (!taskId.value || isDownloading.value) return;
+	isDownloading.value = true;
+	try {
+		const response = await downloadAllFiles(taskId.value);
+		const url = window.URL.createObjectURL(new Blob([response.data]));
+		const link = document.createElement("a");
+		link.href = url;
+		link.setAttribute("download", `${taskId.value}.zip`);
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+		window.URL.revokeObjectURL(url);
+		toast.success("下载成功");
+	} catch (error) {
+		console.error("下载失败:", error);
+		toast.error("下载失败");
+	} finally {
+		isDownloading.value = false;
+	}
+}
 
 onMounted(async () => {
-	taskStore.connectWebSocket(props.task_id);
-	void taskStore.loadTaskMessages(props.task_id);
-	void refreshStatus();
-	timer = setInterval(() => {
-		updateDuration();
-		void refreshStatus();
-	}, 2000);
-	updateDuration();
+	await initTask();
+	refreshTimer = setInterval(() => {
+		void refreshRuntime();
+		void refreshFiles();
+	}, 2500);
 });
-
-onBeforeUnmount(() => {
-	disposed = true;
-	taskStore.closeWebSocket();
-	// 清理计时器
-	if (timer) {
-		clearInterval(timer);
-		timer = null;
-	}
+watch(taskId, initTask);
+onUnmounted(() => {
+	if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>
 
 <template>
-  <div class="fixed inset-0">
-    <ResizablePanelGroup direction="horizontal" class="desktop-layout h-full rounded-lg border">
-      <ResizablePanel :default-size="40" class="h-full">
-        <ChatArea :messages="taskStore.chatMessages" />
-      </ResizablePanel>
-      <ResizableHandle />
-      <ResizablePanel :default-size="60" class="h-full min-w-0">
-        <div class="flex h-full flex-col min-w-0">
-          <Tabs default-value="workflow" class="w-full h-full flex flex-col">
-            <!-- TODO: Agent 的状态 -->
-            <div class="border-b px-4 py-1 flex justify-between">
-              <div class="flex items-center gap-4">
-                <div class="text-sm text-gray-600">
-                  本次查看: <span class="font-mono text-blue-600">{{ runningDuration }}</span>
+  <div class="flex flex-col h-full overflow-hidden">
+    <AppHeader
+      :model="projectStore.selectedModel"
+      :think="projectStore.think"
+      :language="projectStore.language"
+      :paper-engine="projectStore.paperEngine"
+      :phase-label="isReady ? '项目已初始化' : runtime?.stage || ''"
+      @update:model="projectStore.selectedModel = $event"
+      @update:think="projectStore.think = $event"
+      @update:language="projectStore.language = $event"
+      @update:paper-engine="projectStore.paperEngine = $event"
+    >
+      <div class="md:hidden">
+        <Sheet>
+          <SheetTrigger as-child>
+            <Button size="sm" variant="ghost" class="flex items-center gap-1.5">
+              <File class="h-4 w-4" />
+              <span class="sr-only md:not-sr-only">任务详情</span>
+            </Button>
+          </SheetTrigger>
+          <SheetContent side="right" class="w-[400px] sm:w-[540px] p-0 flex flex-col gap-0">
+            <SheetTitle class="sr-only">任务详情</SheetTitle>
+            <div class="flex h-full min-h-0 flex-col bg-background">
+              <div class="flex items-center justify-between h-11 px-4 border-b shrink-0">
+                <div class="flex items-center gap-2">
+                  <button @click="selectedTab = 'files'" :class="['h-11 px-1 text-sm border-b-2', selectedTab === 'files' ? 'font-medium border-blue-500 text-blue-600' : 'text-muted-foreground border-transparent']">工作区文件</button>
+                  <button v-if="hasStartedWorkflow" @click="selectedTab = 'plan'" :class="['h-11 px-1 text-sm border-b-2', selectedTab === 'plan' ? 'font-medium border-blue-500 text-blue-600' : 'text-muted-foreground border-transparent']">执行计划</button>
                 </div>
-                <div class="flex items-center gap-1.5 text-sm">
-                  <span
-                    class="inline-block h-2 w-2 rounded-full"
-                    :class="{
-                      'bg-green-500': taskStore.wsStatus === 'connected',
-                      'bg-yellow-500 animate-pulse': taskStore.wsStatus === 'connecting' || taskStore.wsStatus === 'reconnecting',
-                      'bg-red-500': taskStore.wsStatus === 'disconnected',
-                    }"
-                  />
-                  <span class="text-gray-500">
-                    {{
-                      taskStore.wsStatus === 'connected' ? '已连接'
-                      : taskStore.wsStatus === 'connecting' ? '连接中'
-                      : taskStore.wsStatus === 'reconnecting' ? '重连中'
-                      : '未连接'
-                    }}
-                  </span>
+                <button @click="selectedTab = 'preview'" :class="['h-7 px-2 rounded-md text-xs', selectedTab === 'preview' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-muted-foreground hover:bg-muted']">论文预览</button>
+              </div>
+              <div v-if="selectedTab === 'files'" class="flex-1 min-h-0 flex flex-col">
+                <div class="p-2 border-b">
+                  <Button variant="outline" size="sm" class="w-full justify-start gap-2" :disabled="isDownloading" @click="handleDownloadAll">
+                    <Download class="h-4 w-4" />
+                    {{ isDownloading ? '下载中...' : '下载完整工作区' }}
+                  </Button>
                 </div>
-                <TabsList>
-                  <TabsTrigger value="workflow" class="text-sm">
-                    工作流
-                  </TabsTrigger>
-                  <TabsTrigger value="tools" class="text-sm">
-                    工具执行
-                  </TabsTrigger>
-                  <TabsTrigger value="paper" class="text-sm">
-                    论文预览
-                  </TabsTrigger>
-                </TabsList>
+                <FileManager v-if="fileStore.taskFiles" :files="fileStore.taskFiles.files" :task-id="taskId" :markdown-editable="isReady" @refresh="refreshFiles" />
+                <div v-else class="p-4 space-y-3">
+                  <Skeleton class="h-4 w-full" />
+                  <Skeleton class="h-4 w-5/6" />
+                  <Skeleton class="h-4 w-4/6" />
+                </div>
               </div>
-              <!--  TODO: 其他选项 -->
-
-              <div class="flex justify-end gap-2 items-center">
-                <Button
-                  v-if="taskStore.isRunning"
-                  variant="outline"
-                  :disabled="isPausing"
-                  @click="handlePause"
-                >
-                  <Pause class="h-4 w-4" />
-                  {{ isPausing ? "暂停中..." : "暂停" }}
-                </Button>
-                <Button
-                  v-else-if="isPaused"
-                  :disabled="isResuming"
-                  @click="handleResume"
-                >
-                  <Play class="h-4 w-4" />
-                  {{ isResuming ? "恢复中..." : "继续" }}
-                </Button>
-                <Button
-                  v-if="taskStore.isRunning"
-                  variant="destructive"
-                  :disabled="isStopping"
-                  @click="handleStop"
-                >
-                  <Square class="h-4 w-4" />
-                  {{ isStopping ? "停止中..." : "停止运行" }}
-                </Button>
-                <Button @click="taskStore.downloadMessages" class="flex justify-end">
-                  <Download class="h-4 w-4" />
-                  下载消息
-                </Button>
-
-                <FilesSheet />
-
+              <WorkflowPanel v-else-if="selectedTab === 'plan' && hasStartedWorkflow" :status="runtime" @open-file="selectedTab = 'files'" />
+              <div v-else class="flex-1 min-h-0">
+                <PaperPreview
+                  v-if="fileStore.taskFiles"
+                  :task-id="taskId"
+                  :files="fileStore.taskFiles.files"
+                  :paper-engine="paperEngine"
+                  :accepted="isAcceptedDelivery(runtime?.status)"
+                />
               </div>
-
             </div>
+          </SheetContent>
+        </Sheet>
+      </div>
+    </AppHeader>
 
-            <TabsContent value="workflow" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
-              <WorkflowPanel :status="runtime" />
-            </TabsContent>
+    <div v-if="isReady && !loadingProject" class="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 flex items-center justify-between gap-4">
+      <div class="text-sm text-blue-950">
+        题目和附件已复制到正式工作区。启动前可在右侧编辑 Markdown，文件角色由程序自动识别。
+      </div>
+      <Button :disabled="starting" @click="startCurrentProject">
+        {{ starting ? '启动中...' : '开始建模' }}
+      </Button>
+    </div>
+    <div v-else-if="canResume" class="mx-4 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4">
+      <div class="text-sm text-amber-950">任务已暂停，可从当前阶段恢复。</div>
+      <Button :disabled="starting" @click="resumeCurrentTask">恢复任务</Button>
+    </div>
 
-            <TabsContent value="tools" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
-              <CoderEditor />
-            </TabsContent>
-
-            <TabsContent value="paper" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
-              <PaperPreview :paper-url="runtime?.paper_url ?? null" :loading="runtime === null" :accepted="runtime?.status === 'completed'" />
-            </TabsContent>
-          </Tabs>
+    <div class="flex flex-1 overflow-hidden relative">
+      <div class="flex-1 h-full flex flex-col overflow-hidden">
+        <div v-if="loadingProject" class="p-4 space-y-4">
+          <Skeleton class="h-4 w-3/4" />
+          <Skeleton class="h-4 w-1/2" />
         </div>
-      </ResizablePanel>
-    </ResizablePanelGroup>
+        <div v-else-if="isReady" class="flex-1 flex items-center justify-center text-sm text-muted-foreground px-6 text-center">
+          工作区已就绪。配置模型、输出语言和论文引擎后开始建模。
+        </div>
+        <Main v-else />
+      </div>
 
-    <Tabs default-value="chat" class="mobile-layout h-full min-w-0 flex-col">
-      <header class="shrink-0 border-b bg-white p-2">
-        <div class="mb-2 flex items-center justify-between gap-2">
-          <div class="flex min-w-0 items-center gap-2 text-xs text-gray-500">
-            <span class="inline-block h-2 w-2 shrink-0 rounded-full" :class="{
-              'bg-green-500': taskStore.wsStatus === 'connected',
-              'bg-yellow-500 animate-pulse': taskStore.wsStatus === 'connecting' || taskStore.wsStatus === 'reconnecting',
-              'bg-red-500': taskStore.wsStatus === 'disconnected',
-            }" />
-            <span class="truncate">{{ runningDuration }} · {{ taskStore.wsStatus === 'connected' ? '已连接' : '连接中' }}</span>
+      <div class="hidden md:flex h-full flex-row shrink-0 transition-all duration-200" :class="rightPanelCollapsed ? 'w-10' : 'w-[410px]'">
+        <div class="w-10 border-l bg-muted/20 flex flex-col items-center py-2 gap-2">
+          <button class="h-7 w-7 rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground" @click="rightPanelCollapsed = !rightPanelCollapsed" :title="rightPanelCollapsed ? '展开右栏' : '收起右栏'">{{ rightPanelCollapsed ? '‹' : '›' }}</button>
+          <button class="h-7 w-7 rounded-md hover:bg-muted" title="工作区文件" @click="selectedTab = 'files'; rightPanelCollapsed = false"><File class="h-4 w-4 mx-auto" /></button>
+          <button class="h-7 w-7 rounded-md text-xs hover:bg-muted" title="论文预览" @click="selectedTab = 'preview'; rightPanelCollapsed = false">PDF</button>
+        </div>
+        <div v-if="!rightPanelCollapsed" class="flex-1 border-l flex flex-col h-full min-h-0 bg-background">
+          <div class="flex items-center justify-between h-11 px-4 border-b shrink-0">
+            <div class="flex items-center gap-3">
+              <button @click="selectedTab = 'files'" :class="['h-11 px-1 text-sm border-b-2', selectedTab === 'files' ? 'font-medium border-blue-500 text-blue-600' : 'text-muted-foreground border-transparent']">工作区文件</button>
+              <button v-if="hasStartedWorkflow" @click="selectedTab = 'plan'" :class="['h-11 px-1 text-sm border-b-2', selectedTab === 'plan' ? 'font-medium border-blue-500 text-blue-600' : 'text-muted-foreground border-transparent']">执行计划</button>
+            </div>
+            <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" :disabled="isDownloading" @click="handleDownloadAll"><Download class="h-3.5 w-3.5" />全部</Button>
           </div>
-          <div class="flex shrink-0 gap-1">
-            <Button v-if="taskStore.isRunning" size="icon" variant="outline" :disabled="isPausing"
-              title="持久化暂停" @click="handlePause">
-              <Pause class="h-4 w-4" />
-            </Button>
-            <Button v-else-if="isPaused" size="icon" :disabled="isResuming"
-              title="继续任务" @click="handleResume">
-              <Play class="h-4 w-4" />
-            </Button>
-            <Button v-if="taskStore.isRunning" size="icon" variant="destructive" :disabled="isStopping"
-              title="停止运行" @click="handleStop">
-              <Square class="h-4 w-4" />
-            </Button>
-            <Button size="icon" variant="outline" title="下载消息" @click="taskStore.downloadMessages">
-              <Download class="h-4 w-4" />
-            </Button>
-            <FilesSheet />
+          <div v-if="selectedTab === 'files'" class="flex-1 min-h-0">
+            <FileManager v-if="fileStore.taskFiles" :files="fileStore.taskFiles.files" :task-id="taskId" :markdown-editable="isReady" @refresh="refreshFiles" />
+            <div v-else class="p-4 space-y-3"><Skeleton class="h-4 w-full" /><Skeleton class="h-4 w-5/6" /><Skeleton class="h-4 w-4/6" /></div>
+          </div>
+          <WorkflowPanel v-else-if="selectedTab === 'plan' && hasStartedWorkflow" :status="runtime" @open-file="selectedTab = 'files'" />
+          <div v-else class="flex-1 min-h-0">
+            <PaperPreview v-if="fileStore.taskFiles" :task-id="taskId" :files="fileStore.taskFiles.files" :paper-engine="paperEngine" :accepted="isAcceptedDelivery(runtime?.status)" />
           </div>
         </div>
-        <TabsList class="grid w-full grid-cols-4">
-          <TabsTrigger value="chat" title="对话"><MessageSquare class="h-4 w-4" /></TabsTrigger>
-          <TabsTrigger value="workflow" title="工作流"><Workflow class="h-4 w-4" /></TabsTrigger>
-          <TabsTrigger value="tools" title="工具执行"><Wrench class="h-4 w-4" /></TabsTrigger>
-          <TabsTrigger value="paper" title="论文预览"><FileText class="h-4 w-4" /></TabsTrigger>
-        </TabsList>
-      </header>
-
-      <TabsContent value="chat" class="min-h-0 flex-1 overflow-hidden p-0">
-        <ChatArea :messages="taskStore.chatMessages" />
-      </TabsContent>
-      <TabsContent value="workflow" class="min-h-0 flex-1 overflow-hidden p-0">
-        <WorkflowPanel :status="runtime" />
-      </TabsContent>
-      <TabsContent value="tools" class="min-h-0 flex-1 overflow-hidden p-0">
-        <CoderEditor />
-      </TabsContent>
-      <TabsContent value="paper" class="min-h-0 flex-1 overflow-hidden p-0">
-        <PaperPreview :paper-url="runtime?.paper_url ?? null" :loading="runtime === null" :accepted="runtime?.status === 'completed'" />
-      </TabsContent>
-    </Tabs>
-
+      </div>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.desktop-layout {
-  display: none !important;
-}
-
-.mobile-layout {
-  display: flex !important;
-}
-
-@media (min-width: 768px) {
-  .desktop-layout {
-    display: flex !important;
-  }
-
-  .mobile-layout {
-    display: none !important;
-  }
-}
-</style>
