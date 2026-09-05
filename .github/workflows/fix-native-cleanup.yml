@@ -1,0 +1,41 @@
+name: Publish native cleanup fixes
+on:
+  push:
+    branches: [pi-reliability-efficiency-refactor]
+    paths: [.github/workflows/fix-native-cleanup.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply hash-verified scoped patch
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64,hashlib,json,lzma,os,pathlib,subprocess,urllib.request
+          sha='df44a3a5a266cfe5153fce746e97765487079690'
+          req=urllib.request.Request(f'https://api.github.com/repos/yangzz1125/MathModelAgent/git/blobs/{sha}',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with urllib.request.urlopen(req,timeout=30) as response:
+              data=base64.b64decode(json.load(response)['content'])
+          assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==sha
+          patch=lzma.decompress(data)
+          assert len(patch)==5655
+          assert hashlib.sha256(patch).hexdigest()=='6e696d24a3356549c342140f8a41efde41d911b6640d412ddce1b2286b58d62e'
+          path=pathlib.Path(os.environ['RUNNER_TEMP'])/'native-cleanup.patch';path.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(path)],check=True)
+          subprocess.run(['git','apply','--index',str(path)],check=True)
+          files=set(subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines())
+          assert files=={'pi/runtime_supervision.py','pi/tests/test_runtime_supervision.py','pi/tests/test_balanced_workflow.py'}
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          subprocess.run(['python','-m','compileall','-q','pi'],check=True)
+      - name: Publish without force
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(runtime): fence exited Windows jobs before releasing Host state'
+          git push origin HEAD:refs/heads/pi-reliability-efficiency-refactor
+          git rev-parse HEAD
