@@ -16,9 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ['3.11']
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       MPLBACKEND: Agg
       PYTHONUTF8: '1'
@@ -26,18 +25,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - name: Install test dependencies
-        run: python -m pip install -r pi/requirements.txt httpx pytest
-      - name: Unit and integration regression tests
-        run: python -m pytest pi/tests -v --junitxml=test-results.xml
+      - uses: ./.github/actions/pi-validation-setup
+      - name: Parse PowerShell launchers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: All Pi regression tests
+        run: python -m pytest pi/tests -v --timeout=90 --junitxml=test-results.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pi-tests-${{ matrix.os }}-${{ matrix.python }}
+          name: pi-tests-${{ matrix.os }}-3.11
           path: test-results.xml
+          if-no-files-found: error
           retention-days: 7
   frontend:
     runs-on: ubuntu-latest
@@ -52,23 +57,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install and build
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Tests, typecheck and production build
         working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
-  support:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Small pure-Python wheels for offline local validation
-        run: python -m pip download --no-deps SciencePlots==2.2.2 adjustText==1.4.0 -d wheels
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pi-validation-wheels
-          path: wheels/
-          retention-days: 3
+        run: pnpm install --frozen-lockfile && pnpm test && pnpm build
