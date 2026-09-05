@@ -1,42 +1,14 @@
 <script setup lang="ts">
-import { getTaskStatus } from "@/apis/commonApi";
 import { FileText, RefreshCw } from "lucide-vue-next";
-import { onBeforeUnmount, onMounted, ref } from "vue";
 
-// ---- Props ----
-
-const props = defineProps<{ taskId: string }>();
-
-// ---- State ----
-
-const paperUrl = ref<string | null>(null);
-const loading = ref(true);
-let timer: ReturnType<typeof setInterval> | null = null;
-
-async function refresh() {
-	try {
-		paperUrl.value = (await getTaskStatus(props.taskId)).data.paper_url;
-	} catch (error) {
-		console.error("获取论文预览失败:", error);
-	} finally {
-		loading.value = false;
-	}
-}
-
-onMounted(() => {
-	refresh();
-	timer = setInterval(refresh, 5000);
-});
-
-onBeforeUnmount(() => {
-	if (timer) clearInterval(timer);
-});
+defineProps<{ paperUrl: string | null; loading: boolean; accepted: boolean }>();
 </script>
 
 <template>
   <div class="h-full min-h-0 p-4">
-    <div class="h-full min-h-0 overflow-hidden border bg-white">
-      <iframe v-if="paperUrl" :src="paperUrl" title="论文 PDF 预览" class="h-full w-full border-0" />
+    <div class="flex h-full min-h-0 flex-col overflow-hidden border bg-white">
+      <p v-if="paperUrl && !accepted" class="shrink-0 border-b px-3 py-2 text-xs text-amber-700">论文草稿，尚未通过最终验收</p>
+      <iframe v-if="paperUrl" :src="paperUrl" title="论文 PDF 预览" class="min-h-0 w-full flex-1 border-0" />
       <div v-else class="flex h-full items-center justify-center text-gray-500">
         <div class="text-center">
           <RefreshCw v-if="loading" class="mx-auto mb-3 h-6 w-6 animate-spin" />

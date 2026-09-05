@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { getTaskStatus } from "@/apis/commonApi";
 import CoderEditor from "@/components/AgentEditor/CoderEditor.vue";
 import ChatArea from "@/components/ChatArea.vue";
 import PaperPreview from "@/components/PaperPreview.vue";
@@ -34,6 +35,9 @@ const taskStore = useTaskStore();
 
 /** 运行时长相关状态 */
 const startTime = ref<number>(Date.now());
+const runtime = ref<Awaited<ReturnType<typeof getTaskStatus>>["data"] | null>(null);
+let disposed = false;
+let refreshing = false;
 const currentTime = ref<number>(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -91,24 +95,38 @@ async function handleResume() {
 	isResuming.value = false;
 }
 
-/** 同步 Pi 任务运行状态 */
-function handleRuntimeStatus(status: string, contractVersion: number | null) {
-	isPaused.value = status === "paused";
-	taskStore.setRuntimeStatus(status, contractVersion);
+/** 页面统一轮询，切换标签页不会停止状态更新。 */
+async function refreshStatus() {
+	if (refreshing || disposed) return;
+	refreshing = true;
+	try {
+		const { data } = await getTaskStatus(props.task_id);
+		if (disposed) return;
+		runtime.value = data;
+		isPaused.value = data.status === "paused";
+		taskStore.setRuntimeStatus(data.status, data.contract_version);
+	} catch (error) {
+		console.error("获取任务状态失败:", error);
+	} finally {
+		refreshing = false;
+	}
 }
 
 // ---- Lifecycle Hooks ----
 
 onMounted(async () => {
-	await taskStore.loadTaskMessages(props.task_id);
 	taskStore.connectWebSocket(props.task_id);
-
-	// 开始计时
-	timer = setInterval(updateDuration, 1000);
-	updateDuration(); // 立即更新一次
+	void taskStore.loadTaskMessages(props.task_id);
+	void refreshStatus();
+	timer = setInterval(() => {
+		updateDuration();
+		void refreshStatus();
+	}, 2000);
+	updateDuration();
 });
 
 onBeforeUnmount(() => {
+	disposed = true;
 	taskStore.closeWebSocket();
 	// 清理计时器
 	if (timer) {
@@ -132,7 +150,7 @@ onBeforeUnmount(() => {
             <div class="border-b px-4 py-1 flex justify-between">
               <div class="flex items-center gap-4">
                 <div class="text-sm text-gray-600">
-                  运行时长: <span class="font-mono text-blue-600">{{ runningDuration }}</span>
+                  本次查看: <span class="font-mono text-blue-600">{{ runningDuration }}</span>
                 </div>
                 <div class="flex items-center gap-1.5 text-sm">
                   <span
@@ -205,7 +223,7 @@ onBeforeUnmount(() => {
             </div>
 
             <TabsContent value="workflow" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
-              <WorkflowPanel :task-id="props.task_id" @status="handleRuntimeStatus" />
+              <WorkflowPanel :status="runtime" />
             </TabsContent>
 
             <TabsContent value="tools" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
@@ -213,7 +231,7 @@ onBeforeUnmount(() => {
             </TabsContent>
 
             <TabsContent value="paper" class="flex-1 p-1 min-w-0 h-full overflow-hidden">
-              <PaperPreview :task-id="props.task_id" />
+              <PaperPreview :paper-url="runtime?.paper_url ?? null" :loading="runtime === null" :accepted="runtime?.status === 'completed'" />
             </TabsContent>
           </Tabs>
         </div>
@@ -262,13 +280,13 @@ onBeforeUnmount(() => {
         <ChatArea :messages="taskStore.chatMessages" />
       </TabsContent>
       <TabsContent value="workflow" class="min-h-0 flex-1 overflow-hidden p-0">
-        <WorkflowPanel :task-id="props.task_id" @status="handleRuntimeStatus" />
+        <WorkflowPanel :status="runtime" />
       </TabsContent>
       <TabsContent value="tools" class="min-h-0 flex-1 overflow-hidden p-0">
         <CoderEditor />
       </TabsContent>
       <TabsContent value="paper" class="min-h-0 flex-1 overflow-hidden p-0">
-        <PaperPreview :task-id="props.task_id" />
+        <PaperPreview :paper-url="runtime?.paper_url ?? null" :loading="runtime === null" :accepted="runtime?.status === 'completed'" />
       </TabsContent>
     </Tabs>
 

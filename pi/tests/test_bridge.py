@@ -1514,20 +1514,12 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             workflow["stage_snapshot"] = snapshot
             workflow["review_snapshot"] = snapshot
             review = json.loads(self._accepted_review("inventory", None))
-            workflow["pending_transition"] = {
-                "kind": "inventory_audit",
-                "stage": "inventory_audit",
-                "review": review,
-                "ledger_before": {
-                    "schema_version": 1,
-                    "inventory": {"version": 1, "status": "candidate"},
-                    "problems": {},
-                    "plan_version": 0,
-                },
+            ledger_before = {
+                "schema_version": 1,
+                "inventory": {"version": 1, "status": "candidate"},
+                "problems": {}, "plan_version": 0,
             }
-            workflow["pending_transition"]["signature"] = bridge._transition_signature(
-                "f" * 12, workflow["pending_transition"]
-            )
+            self._write(workspace / "planning/ledger.json", ledger_before)
             self._write(workspace / "project.json", {
                 "status": "running",
                 "problem_file": "input/problem.md",
@@ -1536,10 +1528,11 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 "paper_engine": "LaTeX",
                 "workflow": workflow,
             })
-            partial = json.loads(json.dumps(workflow["pending_transition"]["ledger_before"]))
+            runtime = TaskRuntime("f" * 12, workspace, status="running")
+            runtime._authorize_transition(runtime._project(), "inventory_audit", review)
+            partial = json.loads(json.dumps(ledger_before))
             partial["inventory"]["status"] = "accepted"
             self._write(workspace / "planning" / "ledger.json", partial)
-            runtime = TaskRuntime("f" * 12, workspace, status="running")
             runtime._switch_session = AsyncMock()  # type: ignore[method-assign]
             runtime.prompt = AsyncMock()  # type: ignore[method-assign]
             runtime.system = AsyncMock()  # type: ignore[method-assign]
@@ -1563,17 +1556,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 "required_repairs": ["Use a bounded valid method."],
             })
             project = runtime._project()
-            transition = {
-                "kind": "method_audit",
-                "stage": "method_audit:q1",
-                "review": review,
-                "ledger_before": runtime._ledger(),
-            }
-            transition["signature"] = bridge._transition_signature(
-                runtime.task_id, transition
-            )
-            project["workflow"]["pending_transition"] = transition
-            runtime._save_project(project)
+            runtime._authorize_transition(project, "method_audit", review)
             partial = runtime._ledger()
             partial["problems"]["q1"]["ordinary_audits"] = 99
             runtime._save_ledger(partial)
@@ -1631,17 +1614,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             runtime = self._runtime_at_method_audit(directory)
             review = json.loads(self._method_review())
             project = runtime._project()
-            ledger_before = runtime._ledger()
-            project["workflow"]["pending_transition"] = {
-                "kind": "method_audit",
-                "stage": "method_audit:q1",
-                "review": review,
-                "ledger_before": ledger_before,
-            }
-            project["workflow"]["pending_transition"]["signature"] = bridge._transition_signature(
-                runtime.task_id, project["workflow"]["pending_transition"]
-            )
-            runtime._save_project(project)
+            runtime._authorize_transition(project, "method_audit", review)
             partial_ledger = runtime._ledger()
             partial_ledger["problems"]["q1"]["ordinary_audits"] = 99
             runtime._save_ledger(partial_ledger)
@@ -1907,18 +1880,8 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime._project()["workflow"]["mode"], "scientific_review")
             accepted_text = self._accepted_review("scientific", "q1")
             accepted_review = json.loads(accepted_text)
-            ledger_before = runtime._ledger()
             project = runtime._project()
-            project["workflow"]["pending_transition"] = {
-                "kind": "scientific_review",
-                "stage": "problem:q1",
-                "review": accepted_review,
-                "ledger_before": ledger_before,
-            }
-            project["workflow"]["pending_transition"]["signature"] = bridge._transition_signature(
-                runtime.task_id, project["workflow"]["pending_transition"]
-            )
-            runtime._save_project(project)
+            runtime._authorize_transition(project, "scientific_review", accepted_review)
             review_path = workspace / "reports" / "q1_SCIENTIFIC_REVIEW.json"
             review_path.write_text(
                 json.dumps(json.loads(accepted_text), ensure_ascii=False, indent=2) + "\n",
@@ -3700,7 +3663,7 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await reader.readline(), payload)
 
-    async def test_rpc_command_matches_response_by_command(self) -> None:
+    async def test_rpc_command_matches_response_by_request_id(self) -> None:
         class FakeStdin:
             def __init__(self) -> None:
                 self.data = b""
@@ -3719,6 +3682,7 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             await runtime._handle_event({
                 "type": "response", "command": "new_session", "success": True,
+                "id": json.loads(stdin.data)["id"],
                 "data": {"cancelled": False},
             })
 

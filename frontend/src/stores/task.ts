@@ -40,6 +40,7 @@ export const useTaskStore = defineStore("task", () => {
 
 	/** WebSocket 实例 */
 	let ws: TaskWebSocket | null = null;
+	let connectionGeneration = 0;
 
 	/** WebSocket 连接状态 */
 	const wsStatus = ref<
@@ -169,6 +170,7 @@ export const useTaskStore = defineStore("task", () => {
 
 	/** 连接 WebSocket 接收实时消息 */
 	function connectWebSocket(taskId: string) {
+		const generation = ++connectionGeneration;
 		if (ws) {
 			ws.close();
 			ws = null;
@@ -177,7 +179,7 @@ export const useTaskStore = defineStore("task", () => {
 		ensureTaskBucket(taskId);
 		runtimeStatus.value = null;
 		contractVersion.value = null;
-		isRunning.value = true;
+		isRunning.value = false;
 
 		const baseUrl = import.meta.env.VITE_WS_URL;
 		const wsUrl = `${baseUrl}/task/${taskId}`;
@@ -185,6 +187,7 @@ export const useTaskStore = defineStore("task", () => {
 		ws = new TaskWebSocket(
 			wsUrl,
 			(data) => {
+				if (generation !== connectionGeneration) return;
 				if (!isMessagePayload(data)) {
 					console.warn("忽略非标准任务消息:", data);
 					return;
@@ -199,6 +202,7 @@ export const useTaskStore = defineStore("task", () => {
 				}
 			},
 			(status) => {
+				if (generation !== connectionGeneration) return;
 				wsStatus.value = status;
 			},
 		);
@@ -220,8 +224,10 @@ export const useTaskStore = defineStore("task", () => {
 
 	/** 关闭 WebSocket 连接 */
 	function closeWebSocket() {
+		connectionGeneration++;
 		ws?.close();
 		ws = null;
+		wsStatus.value = "disconnected";
 	}
 
 	/** 持久化暂停当前任务。 */

@@ -598,7 +598,7 @@ def candidate_errors(workspace: Path, problem: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     result = _json_file(workspace / "results" / problem_id / "result.json", errors)
     verification = _json_file(workspace / "results" / problem_id / "verification.json", errors)
-    if result:
+    if result is not None:
         if result.get("problem_id") != problem_id:
             errors.append("candidate_protocol: result problem_id mismatch")
         if result.get("status") != "candidate":
@@ -619,7 +619,7 @@ def candidate_errors(workspace: Path, problem: dict[str, Any]) -> list[str]:
                 )
                 if not valid:
                     errors.append(f"candidate_protocol: invalid metric {index}")
-    if not verification:
+    if verification is None:
         return errors
     if verification.get("schema_version") != 2 or verification.get("status") != "candidate":
         errors.append("candidate_protocol: verification schema/status")
@@ -1116,7 +1116,7 @@ def paper_source_errors(
     bibliography_keys = re.findall(
         r"\\bibitem(?:\s*\[[^\]]*\])?\s*\{([^{}\s]+)\}", text
     )
-    if bibliography_keys:
+    if bibliography_keys or strict:
         duplicates = sorted(
             key for key in set(bibliography_keys) if bibliography_keys.count(key) > 1
         )
@@ -1302,7 +1302,17 @@ def validate_paper_manifest(
     if seen != expected:
         raise ScientificContractError(f"paper manifest missing claims: {sorted(expected - seen)}")
     if strict:
-        errors = _paper_figure_errors(workspace, paper_plan, [row["section_file"] for row in item["coverage"]])
+        paper = workspace / "paper"
+        master = paper / ("main.tex" if (paper / "main.tex").is_file() else "main.typ")
+        sources, source_errors = _reachable_paper_sources(paper, [master])
+        errors = [f"paper_sources: {error}" for error in source_errors]
+        for row in item["coverage"]:
+            path = (workspace / row["section_file"]).resolve()
+            if path not in sources:
+                errors.append(f"paper_manifest: claim section is not reachable from master: {row['section_file']}")
+            elif any(sources[path].count(anchor) != 1 for anchor in row["anchors"].values()):
+                errors.append(f"paper_manifest: anchors must occur in uncommented reachable source: {row['claim_id']}")
+        errors.extend(_paper_figure_errors(workspace, paper_plan, [row["section_file"] for row in item["coverage"]]))
         if errors:
             raise ScientificContractError("; ".join(errors))
     return item

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getTaskStatus } from "@/apis/commonApi";
+import type { getTaskStatus } from "@/apis/commonApi";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
 	AlertCircle,
@@ -8,63 +8,15 @@ import {
 	LoaderCircle,
 	PauseCircle,
 } from "lucide-vue-next";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, toRef } from "vue";
 
 // ---- Props ----
 
-const props = defineProps<{ taskId: string }>();
-const emit = defineEmits<(
-	event: "status",
-	status: string,
-	contractVersion: number | null,
-) => void>();
+const props = defineProps<{ status: Awaited<ReturnType<typeof getTaskStatus>>["data"] | null }>();
 
 // ---- State ----
 
-type PhaseStatus =
-	| "pending"
-	| "running"
-	| "paused"
-	| "completed"
-	| "waiting"
-	| "failed";
-
-interface TaskStatus {
-	status: string;
-	model: string;
-	thinking: string;
-	profiles: {
-		planner: { model: string; thinking: string };
-		worker: { model: string; thinking: string };
-	} | null;
-	current_stage: string | null;
-	mode: string | null;
-	plan_version: number | null;
-	contract_version: number | null;
-	started_at: string;
-	phases: {
-		id: string;
-		label: string;
-		status: PhaseStatus;
-		attempts?: number;
-		candidate_repair_attempts?: number;
-		protocol_attempts?: number;
-		local_repair_attempts?: number;
-		review_attempts?: number;
-		replan_attempts?: number;
-		review_status?: string;
-		scientific_status?: string;
-		reused_from_version?: number;
-		proposal_version?: number;
-		method_status?: string;
-		spike_budget_seconds?: number;
-		last_error?: string;
-	}[];
-	paper_url: string | null;
-}
-
-const status = ref<TaskStatus | null>(null);
-let timer: ReturnType<typeof setInterval> | null = null;
+const status = toRef(props, "status");
 
 const statusLabel = computed(() => {
 	switch (status.value?.status) {
@@ -100,23 +52,7 @@ function reviewLabel(value?: string) {
 	return value ? reviewLabels[value] || value : "";
 }
 
-async function refresh() {
-	try {
-		status.value = (await getTaskStatus(props.taskId)).data;
-		emit("status", status.value.status, status.value.contract_version);
-	} catch (error) {
-		console.error("获取 Pi 任务状态失败:", error);
-	}
-}
 
-onMounted(() => {
-	refresh();
-	timer = setInterval(refresh, 2000);
-});
-
-onBeforeUnmount(() => {
-	if (timer) clearInterval(timer);
-});
 </script>
 
 <template>

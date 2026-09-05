@@ -4,5 +4,5 @@ import Toaster from "@/components/ui/toast/Toaster.vue";
 
 <template>
   <Toaster />
-  <router-view />
+  <router-view :key="$route.path" />
 </template>

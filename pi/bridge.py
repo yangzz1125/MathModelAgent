@@ -544,15 +544,16 @@ async def _initialize_project(
             )
             relative = _upload_path(raw_path, source_folder)
             manifest_path = relative.as_posix()
-            if manifest_path in seen_paths:
+            normalized_key = manifest_path.casefold()
+            if normalized_key in seen_paths:
                 raise HTTPException(
                     status_code=400, detail=f"Duplicate upload path: {manifest_path}"
                 )
-            seen_paths.add(manifest_path)
+            seen_paths.add(normalized_key)
             target = input_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             file_bytes = 0
-            with target.open("wb") as output:
+            with target.open("xb") as output:
                 while chunk := await upload.read(1024 * 1024):
                     file_bytes += len(chunk)
                     total_bytes += len(chunk)
@@ -572,6 +573,8 @@ async def _initialize_project(
         if question.strip():
             notes_name = "problem.md" if not copied else "user_notes.md"
             notes = input_dir / notes_name
+            if notes_name.casefold() in seen_paths or notes.exists():
+                raise HTTPException(status_code=400, detail=f"User notes conflict with uploaded file: {notes_name}")
             notes.write_text(question.strip() + "\n", encoding="utf-8")
             copied.append(
                 {
@@ -702,6 +705,20 @@ async def _start_project(
         ) from exc
 
     manifest["problem_file"] = problem_file
+    notes_path = ""
+    if request.question.strip():
+        index = 1
+        while True:
+            notes_file = runtime.workspace / "input" / f"user_requirements_{index}.md"
+            try:
+                with notes_file.open("x", encoding="utf-8") as output:
+                    output.write(request.question.strip() + "\n")
+                break
+            except FileExistsError:
+                index += 1
+        notes_path = notes_file.relative_to(runtime.workspace).as_posix()
+        manifest["files"].append({"path": notes_file.name, "size_bytes": notes_file.stat().st_size, "type": "md"})
+        manifest["references"].append(notes_path)
     _write_json(manifest_path, manifest)
     project_path = runtime.workspace / "project.json"
     project = json.loads(project_path.read_text(encoding="utf-8"))
@@ -731,6 +748,8 @@ async def _start_project(
         {
             "status": "starting",
             "problem_file": problem_file,
+            "user_notes": request.question.strip(),
+            "user_requirements_file": notes_path,
             "competition": request.competition,
             "language": request.language,
             "paper_engine": request.paper_engine,
@@ -785,9 +804,12 @@ class TaskRuntime:
     _tool_message_ids: dict[str, str] = field(default_factory=dict)
     _tool_watchdogs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _tool_started_at: dict[str, float] = field(default_factory=dict)
-    _pending_rpc: dict[str, list[asyncio.Future[dict[str, Any]]]] = field(
-        default_factory=dict
-    )
+    _pending_rpc: dict[str, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
+    _prompt_watchdogs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _control_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _terminate_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _transitions: set[asyncio.Task[Any]] = field(default_factory=set)
+    _stopping: bool = False
     _transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _host_render_cancel: threading.Event | None = None
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -871,15 +893,13 @@ class TaskRuntime:
         future: asyncio.Future[dict[str, Any]] = (
             asyncio.get_running_loop().create_future()
         )
-        self._pending_rpc.setdefault(command, []).append(future)
+        request_id = uuid.uuid4().hex
+        self._pending_rpc[request_id] = future
         try:
-            await self.send_rpc({"id": uuid.uuid4().hex, **payload})
+            await self.send_rpc({**payload, "id": request_id})
             response = await asyncio.wait_for(future, timeout=timeout)
-        except Exception:
-            pending = self._pending_rpc.get(command, [])
-            if future in pending:
-                pending.remove(future)
-            raise
+        finally:
+            self._pending_rpc.pop(request_id, None)
         if not response.get("success", False):
             raise RuntimeError(
                 f"Pi {command} failed: {response.get('error', 'unknown error')}"
@@ -887,6 +907,8 @@ class TaskRuntime:
         return response
 
     async def prompt(self, text: str, *, initial: bool = False) -> None:
+        if self._stopping or self.status in {"paused", "cancelled", "failed", "completed"}:
+            raise asyncio.CancelledError
         self._last_assistant_text = ""
         payload: dict[str, Any] = {
             "id": uuid.uuid4().hex,
@@ -896,10 +918,40 @@ class TaskRuntime:
         if not initial and self.status == "running":
             payload["streamingBehavior"] = "steer"
         self.set_status("running")
-        await self.send_rpc(payload)
+        request_id = payload["id"]
+        self._prompt_watchdogs[request_id] = asyncio.create_task(self._watch_prompt(request_id))
+        try:
+            await self.send_rpc(payload)
+        except BaseException:
+            watchdog = self._prompt_watchdogs.pop(request_id, None)
+            if watchdog:
+                watchdog.cancel()
+            raise
+
+    async def _watch_prompt(self, request_id: str) -> None:
+        await asyncio.sleep(30)
+        self._prompt_watchdogs.pop(request_id, None)
+        await self._pause_rpc_failure("Pi prompt acknowledgement timed out")
+
+    async def _pause_rpc_failure(self, error: str) -> None:
+        if self.status not in {"starting", "running"} or self._stopping:
+            return
+        try:
+            await self.pause(f"rpc_error: {error}")
+        except (HTTPException, RuntimeError, OSError) as exc:
+            await self.system(f"Pi RPC failure; cleanup requires attention: {exc}", "error")
 
     async def terminate(self) -> None:
+        """Single-flight teardown shared by control requests and runner finalization."""
+        async with self._terminate_lock:
+            await self._terminate_process()
+
+    async def _terminate_process(self) -> None:
         """Terminate the RPC wrapper and its Pi/Node descendants."""
+        for watchdog in self._prompt_watchdogs.values():
+            if watchdog is not asyncio.current_task():
+                watchdog.cancel()
+        self._prompt_watchdogs.clear()
         if self._host_render_cancel is not None:
             self._host_render_cancel.set()
         for watchdog in self._tool_watchdogs.values():
@@ -931,9 +983,14 @@ class TaskRuntime:
             )
             _, error = await killer.communicate()
             if killer.returncode != 0:
-                raise RuntimeError(
-                    f"Pi process-tree termination failed: {error.decode(errors='replace')}"
-                )
+                # A naturally exited wrapper can race taskkill. Confirm exit, never
+                # infer success from localized error text or ignore access denial.
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=1)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"Pi process-tree termination failed: {error.decode(errors='replace')}"
+                    ) from exc
         else:
             self.process.terminate()
         try:
@@ -944,8 +1001,14 @@ class TaskRuntime:
         self._release_host_state()
 
     async def pause(self, reason: str = "user") -> None:
+        async with self._control_lock:
+            await self._pause(reason)
+
+    async def _pause(self, reason: str) -> None:
         if self.status not in {"starting", "running"}:
             raise HTTPException(status_code=409, detail="Task is not running")
+        self._stopping = True
+        await self._quiesce_transitions()
         project = self._project()
         project["status"] = "paused"
         project["paused_at"] = _now()
@@ -972,19 +1035,36 @@ class TaskRuntime:
         self._save_project(project)
         self.status = "paused"
         await self.system("任务已持久化暂停，可以稍后从当前阶段恢复", "warning")
+        await self._stop_runtime()
+
+    async def _quiesce_transitions(self) -> None:
+        rendering = self._host_render_cancel
+        if rendering is not None:
+            rendering.set()
+        transitions = [task for task in self._transitions if task is not asyncio.current_task() and not task.done()]
+        if rendering is None:
+            for task in transitions:
+                task.cancel()
+        if transitions:
+            await asyncio.gather(*transitions, return_exceptions=True)
+
+    async def _stop_runtime(self) -> None:
+        await self._quiesce_transitions()
         if self.process and self.process.returncode is None:
             try:
-                await self.send_rpc({"type": "clear_queue"})
-                await self.send_rpc({"type": "abort"})
-            except (BrokenPipeError, ConnectionError, RuntimeError):
+                await asyncio.wait_for(self.send_rpc({"type": "abort"}), timeout=2)
+            except (OSError, RuntimeError, asyncio.TimeoutError):
                 pass
         runner = self.runner
-        await self.terminate()
+        # Do not release the Host boundary while suspended process creation is
+        # in flight; run() will detect _stopping and tear down that new process.
+        if self.process is not None or not runner or runner.done():
+            await self.terminate()
         if runner and runner is not asyncio.current_task() and not runner.done():
             try:
-                await asyncio.wait_for(asyncio.shield(runner), timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+                await asyncio.wait_for(asyncio.shield(runner), timeout=15)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("Old Pi runner has not stopped; resume is blocked") from exc
         self.runner = None
         self.process = None
 
@@ -1065,7 +1145,7 @@ class TaskRuntime:
                     version=version,
                     competition=str(project.get("competition") or "CUMCM"),
                     language=str(project.get("language") or "Chinese"),
-                    notes="",
+                    notes=str(project.get("user_notes") or ""),
                     evidence_paths=context_paths,
                 )
                 if mode == "inventory"
@@ -1210,14 +1290,25 @@ class TaskRuntime:
         return self._prompt_for_current(project)
 
     async def resume(self) -> None:
+        async with self._control_lock:
+            await self._resume()
+
+    async def _resume(self) -> None:
         if self.status != "paused":
             raise HTTPException(status_code=409, detail="Task is not paused")
-        if self.process and self.process.returncode is None:
-            raise HTTPException(status_code=409, detail="Task process is still running")
+        if (self.process and self.process.returncode is None) or (self.runner and not self.runner.done()):
+            raise HTTPException(status_code=409, detail="Task process/runner is still running")
         project = self._project()
         workflow = project.get("workflow")
         if not isinstance(workflow, dict):
             raise HTTPException(status_code=409, detail="Legacy task cannot be resumed persistently")
+        pending = workflow.get("pending_transition")
+        if pending is not None:
+            try:
+                self._pending_transition(workflow, str(pending.get("kind") or ""))
+            except (ContractError, AttributeError) as exc:
+                raise HTTPException(status_code=409, detail=f"Unsafe pending transition: {exc}") from exc
+        prompt = self._resume_prompt(project)
         profile = self._profile_for_resume(project)
         config = workflow["profiles"][profile]
         self.requested_model = str(config.get("model") or "")
@@ -1232,19 +1323,22 @@ class TaskRuntime:
         project.pop("pause_reason", None)
         self._save_project(project)
         self.status = "starting"
+        self._stopping = False
         await self.system("正在从持久化阶段恢复任务")
-        self.runner = asyncio.create_task(self.run(self._resume_prompt(project)))
+        self.runner = asyncio.create_task(self.run(prompt))
 
     async def abort(self) -> None:
-        if self.process and self.process.returncode is None:
-            await self.send_rpc({"type": "clear_queue"})
-            await self.send_rpc({"type": "abort"})
-        self.set_status("cancelled")
-        await self.system("任务已停止", "warning")
-        await self.terminate()
+        async with self._control_lock:
+            self._stopping = True
+            await self._quiesce_transitions()
+            self.set_status("cancelled")
+            await self.system("任务已停止", "warning")
+            await self._stop_runtime()
 
     async def run(self, prompt: str) -> None:
         """Spawn Pi, send the workflow prompt, and translate RPC events."""
+        if self._stopping:
+            return
         pi_executable = shutil.which("pi.cmd") or shutil.which("pi")
         if not pi_executable:
             self.set_status("failed")
@@ -1315,6 +1409,8 @@ class TaskRuntime:
                 limit=RPC_STREAM_LIMIT_BYTES,
                 creationflags=creationflags,
             )
+            if self._stopping:
+                return
             project = self._project()
             project["runtime_owner_pid"] = os.getpid()
             project["pi_pid"] = self.process.pid
@@ -1331,6 +1427,8 @@ class TaskRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if self._stopping:
+                return
             try:
                 project = self._project()
                 workflow = project.get("workflow")
@@ -1394,12 +1492,15 @@ class TaskRuntime:
     async def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
         if event_type == "response":
-            command = str(event.get("command") or "")
-            pending = self._pending_rpc.get(command, [])
-            if pending:
-                future = pending.pop(0)
-                if not future.done():
-                    future.set_result(event)
+            request_id = str(event.get("id") or "")
+            future = self._pending_rpc.pop(request_id, None)
+            if future is not None and not future.done():
+                future.set_result(event)
+            watchdog = self._prompt_watchdogs.pop(request_id, None)
+            if watchdog:
+                watchdog.cancel()
+                if not event.get("success", False):
+                    asyncio.create_task(self._pause_rpc_failure(str(event.get("error") or "prompt rejected")))
             if event.get("id") == "initial-state" and event.get("success"):
                 model = (event.get("data") or {}).get("model") or {}
                 self.model = str(model.get("name") or model.get("id") or self.model)
@@ -1632,6 +1733,7 @@ class TaskRuntime:
         supplemental: bool | None = None,
     ) -> dict[str, Any]:
         entry = (self._ledger().get("problems") or {}).get(card["problem_id"]) or {}
+        supplemental = bool(workflow.get("supplemental_spike")) if supplemental is None else supplemental
         source_version = (
             card["proposal_version"]
             if supplemental
@@ -1640,15 +1742,11 @@ class TaskRuntime:
         return validate_spike_report(
             self.workspace,
             card,
-            supplemental=(
-                bool(workflow.get("supplemental_spike"))
-                if supplemental is None
-                else supplemental
-            ),
+            supplemental=supplemental,
             source_version=source_version,
             supplemental_ids=(
                 set(workflow.get("supplemental_spike_ids") or [])
-                if (bool(workflow.get("supplemental_spike")) if supplemental is None else supplemental)
+                if supplemental
                 else None
             ),
         )
@@ -1675,7 +1773,7 @@ class TaskRuntime:
         workflow = project["workflow"]
         stage = str(workflow.get("current") or "")
         mode = str(workflow.get("mode") or "run")
-        paths = {str(project.get("problem_file") or ""), "input_manifest.json"}
+        paths = {str(project.get("problem_file") or ""), str(project.get("user_requirements_file") or ""), "input_manifest.json"}
 
         def add_tree(relative: str) -> None:
             root = self.workspace / relative
@@ -1800,6 +1898,7 @@ class TaskRuntime:
         workflow = project["workflow"]
         paths = {
             str(project.get("problem_file") or ""),
+            str(project.get("user_requirements_file") or ""),
             "input_manifest.json",
             "execution_plan.json",
             "reports/ANALYSIS_MODELING_REPORT.md",
@@ -1915,7 +2014,7 @@ class TaskRuntime:
                 competition=str(project.get("competition") or "CUMCM"),
                 language=str(project.get("language") or "Chinese"),
                 paper_engine=str(project.get("paper_engine") or "LaTeX"),
-                notes="",
+                notes=str(project.get("user_notes") or ""),
             )
         if stage == "plan_audit":
             return plan_audit_prompt(self._stage_context_paths(project))
@@ -2093,7 +2192,9 @@ class TaskRuntime:
             if not report.is_file() or not report.stat().st_size:
                 errors.append("artifact_missing: reports/DRAWIO_REPORT.md")
         elif stage == "writing":
-            if not _paper_readable(self.workspace):
+            # v3 performs the authoritative, cancellable full render immediately
+            # after this gate; avoid a second blocking Poppler subprocess here.
+            if not (_paper_pdf(self.workspace) if workflow.get("contract_version") == 3 else _paper_readable(self.workspace)):
                 errors.append("validation_failed: paper PDF is missing, empty, or unreadable")
             if workflow.get("contract_version") in {2, 3}:
                 try:
@@ -2135,7 +2236,7 @@ class TaskRuntime:
                 text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
                 if not _verification_passed(text):
                     errors.append("validation_failed: reports/VERIFY_REPORT.md does not have an explicit PASS conclusion")
-            if not _paper_readable(self.workspace):
+            if not (_paper_pdf(self.workspace) if workflow.get("contract_version") == 3 else _paper_readable(self.workspace)):
                 errors.append("validation_failed: paper PDF is missing, empty, or unreadable")
         return errors, plan
 
@@ -2726,6 +2827,8 @@ class TaskRuntime:
             and pending.get("stage") == workflow.get("current")
             and isinstance(pending.get("review"), dict)
             and isinstance(pending.get("ledger_before"), dict)
+            and isinstance(pending.get("reviewed_files"), dict)
+            and isinstance(pending.get("host_before"), dict)
             and isinstance(pending.get("signature"), str)
             and hmac.compare_digest(
                 pending["signature"], _transition_signature(self.task_id, pending)
@@ -2733,6 +2836,18 @@ class TaskRuntime:
         )
         if not valid:
             raise ContractError("Host pending transition is invalid or forged")
+        actual = workspace_hashes(self.workspace)
+        host_paths = set(pending["host_before"]) | {"planning/ledger.json"}
+        if {path: digest for path, digest in actual.items() if path not in host_paths} != pending["reviewed_files"]:
+            raise ContractError("reviewed artifacts changed during pending transition")
+        # Roll back only signed Host outputs before replaying the deterministic writes.
+        for relative, content in pending["host_before"].items():
+            path = self.workspace / relative
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
         self._save_ledger(pending["ledger_before"])
         return pending
 
@@ -2743,11 +2858,27 @@ class TaskRuntime:
         review: dict[str, Any],
     ) -> None:
         workflow = project["workflow"]
+        phase = self._current_phase(workflow) or {}
+        problem_id = self._phase_problem_id(workflow)
+        if kind == "inventory_audit":
+            outputs = [inventory_path(self.workspace, int(workflow.get("inventory_version") or 1)).with_name("audit.json")]
+        elif kind == "method_audit":
+            outputs = [method_version_dir(self.workspace, problem_id, self._proposal_version(workflow)) / f"audit_{int(phase.get('attempts') or 1)}.json",
+                       self.workspace / "execution_plan.json", self.workspace / "reports/ANALYSIS_MODELING_REPORT.md"]
+        elif kind == "scientific_review":
+            outputs = [self.workspace / "reports" / f"{problem_id}_SCIENTIFIC_REVIEW.json",
+                       self.workspace / "reports/PLAN_COMPLETENESS.json"]
+        else:
+            raise ContractError(f"unsupported Host transition: {kind}")
+        host_before = {path.relative_to(self.workspace).as_posix(): path.read_text(encoding="utf-8") if path.is_file() else None for path in outputs}
         transition = {
             "kind": kind,
             "stage": workflow.get("current"),
             "review": review,
             "ledger_before": self._ledger(),
+            "host_before": host_before,
+            "reviewed_files": {path: digest for path, digest in workspace_hashes(self.workspace).items()
+                               if path not in host_before and path != "planning/ledger.json"},
         }
         transition["signature"] = _transition_signature(self.task_id, transition)
         workflow["pending_transition"] = transition
@@ -2841,6 +2972,10 @@ class TaskRuntime:
         if not problem_id:
             await self._wait_with_errors(["method_revision: current problem missing"])
             return
+        audit_phase = next(item for item in workflow["phases"] if item["id"] == f"method_audit:{problem_id}")
+        if not downgrade_only and int(audit_phase.get("attempts") or 0) >= 3:
+            await self._wait_with_errors(["method_rejected: ordinary method audit/revision budget exhausted"])
+            return
         ledger = self._ledger()
         problems = ledger.setdefault("problems", {})
         base_card = self._method_card(workflow)
@@ -2883,6 +3018,7 @@ class TaskRuntime:
         if downgrade_only:
             workflow["downgrade_base_spec"] = previous.get("previous_method_spec_sha256", "")
             workflow["downgrade_base_problem"] = (base_card or {}).get("problem")
+            workflow["downgrade_base_card"] = base_card
             workflow["downgrade_claim_ids"] = [
                 item["claim_id"] for item in review.get("allowed_downgrades") or []
             ]
@@ -2984,18 +3120,17 @@ class TaskRuntime:
                 claim["id"]: claim.get("evidence_level")
                 for claim in card["problem"].get("claims", [])
             }
-            early_downgrades = sorted(
-                claim_id
-                for claim_id, old_level in base_levels.items()
-                if old_level == "A_certified"
-                and current_levels.get(claim_id) == "B_bounded_numerical"
-            )
-            if early_downgrades:
+            if current_levels != base_levels:
                 await self._wait_with_errors([
-                    f"evidence_downgrade: A to B requires exhausted audit authorization: {early_downgrades}"
+                    "evidence_downgrade: ordinary revisions must preserve claim IDs and evidence levels; A to B requires exhausted audit authorization"
                 ])
                 return
         if workflow.get("mode") == "evidence_downgrade":
+            base_card = workflow.get("downgrade_base_card")
+            method_fields = ("finite_domain", "witness_strategy", "gap_or_tail_exclusion", "cost_model", "spike_spec")
+            if not isinstance(base_card, dict) or any(card.get(key) != base_card.get(key) for key in method_fields):
+                await self._wait_with_errors(["evidence_downgrade: non-claim method specification changed or missing base card"])
+                return
             allowed = set(workflow.get("downgrade_claim_ids") or [])
             base_problem = workflow.get("downgrade_base_problem")
             if not isinstance(base_problem, dict) or {
@@ -3067,6 +3202,7 @@ class TaskRuntime:
         self._save_ledger(ledger)
         workflow.pop("downgrade_base_spec", None)
         workflow.pop("downgrade_base_problem", None)
+        workflow.pop("downgrade_base_card", None)
         workflow.pop("downgrade_claim_ids", None)
         workflow.pop("revision_base_evidence_levels", None)
         workflow["supplemental_spike"] = False
@@ -3211,14 +3347,14 @@ class TaskRuntime:
     async def _finish_method_audit_v3(self, project: dict[str, Any]) -> None:
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
-        card = self._method_card(workflow)
-        if not phase or not card:
-            await self._wait_with_errors(["method_audit: current method card missing"])
-            return
         try:
             pending = self._pending_transition(workflow, "method_audit")
         except ContractError as exc:
             await self._wait_with_errors([f"method_audit: {exc}"])
+            return
+        card = self._method_card(workflow)
+        if not phase or not card:
+            await self._wait_with_errors(["method_audit: current method card missing"])
             return
         if pending:
             review = pending["review"]
@@ -3321,11 +3457,15 @@ class TaskRuntime:
         if not problem_id:
             await self._wait_with_errors(["method_rejected: problem missing"])
             return
-        ledger = self._ledger()
-        entry = (ledger.get("problems") or {}).get(problem_id)
-        if isinstance(entry, dict):
-            entry["status"] = "superseded"
-            self._save_ledger(ledger)
+        phase = self._current_phase(workflow)
+        if review.get("verdict") == "blocked" or review.get("issue_class") == "blocked":
+            await self._wait_with_errors([f"scientific_blocked: {issue}" for issue in review["issues"]])
+            return
+        # A problem gets one scientific method replan, as in the v2 contract.
+        if not phase or int(phase.get("replan_attempts") or 0) >= 1:
+            await self._wait_with_errors(["method_rejected: scientific method replan budget exhausted"])
+            return
+        phase["replan_attempts"] = int(phase.get("replan_attempts") or 0) + 1
         await self._restart_v3_problem_planning(project, review)
 
     async def _repair_paper_plan(self, project: dict[str, Any], errors: list[str]) -> None:
@@ -3466,8 +3606,18 @@ class TaskRuntime:
             await self._complete_current(project, plan)
 
     async def _settled(self) -> None:
+        task = asyncio.current_task()
+        self._transitions.add(task)
+        try:
+            await self._advance_settled()
+        except Exception as exc:
+            await self._pause_rpc_failure(f"stage transition failed: {exc}")
+        finally:
+            self._transitions.discard(task)
+
+    async def _advance_settled(self) -> None:
         async with self._transition_lock:
-            if self.status in {"cancelled", "failed", "completed", "paused"}:
+            if self._stopping or self.status in {"cancelled", "failed", "completed", "paused"}:
                 return
             project_path = self.workspace / "project.json"
             if not project_path.is_file():
@@ -3841,7 +3991,8 @@ async def task_status(task_id: str, request: Request) -> dict[str, Any]:
     pdf = _paper_pdf(runtime.workspace)
     paper_url = None
     if pdf:
-        paper_url = str(request.base_url).rstrip("/") + f"/preview/{task_id}"
+        stat = pdf.stat()
+        paper_url = str(request.base_url).rstrip("/") + f"/preview/{task_id}?v={stat.st_mtime_ns}-{stat.st_size}"
     project = runtime._project()
     workflow = project.get("workflow")
     phases = _phase_statuses(runtime.workspace, runtime.status)
