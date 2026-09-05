@@ -2,13 +2,21 @@
 
 ## Change
 
-Chinese CUMCM LaTeX tasks now select the versioned `cumcm-v1` layout when a new task or explicit failed-paper continuation is created. Other competitions, languages, Typst and historical workflows without the new policy retain their existing gate behavior.
+Chinese CUMCM LaTeX tasks now select the versioned `cumcm-v2` layout when a new task or explicit failed-paper continuation is created. The previous `cumcm-v1` file remains immutable and supported for pinned historical tasks. Other competitions, languages, Typst and historical workflows without the new policy retain their existing gate behavior.
 
 `pi/latex/cumcm-v1.tex` provides the shared preamble: A4, 2.5 cm margins, 12pt master class, the upstream 1.43 line-spread choice, bounded heading/display-math/float spacing, ragged page bottoms, floating `[htbp]` defaults, an anonymous title without empty author/date rows, and intentional abstract/contents/body boundaries. These are the application's defaults, not a claim to validate each year's official contest regulations.
 
 Every Writing entry, including repair prompts, instructs the program to copy the layout unchanged into `paper/cumcm-layout.tex` and use its title/contents commands. This overrides the upstream skill's `[H]` examples without changing upstream skills. Writing and Verify gates check the versioned style bytes, master class, literal preamble inclusion, title command and single contents command. The source checks are not a general TeX interpreter and cannot prove the absence of every possible downstream macro override. Actual PDF page inspection remains required. `[H]` is discouraged rather than universally forbidden: float placement must still be assessed against actual figure size and reading order.
 
 Read-only Document Review now explicitly checks excessive title spacing, contents boundaries, stretched internal gaps and avoidable body-page holes around figures/tables. Intentional front-matter and last-page whitespace are not blanket failures. No retry allowance or scientific evidence rule was relaxed.
+
+## Abstract Correction (v2)
+
+First-page pixel inspection exposed a missed default: article/ctexart's `abstract` uses `small` plus `quotation`, adding side margins around an already indented first paragraph. Version 2 replaces this environment with full body text width, normal body size and a two-Chinese-character first-line indent. The keyword line and subsequent abstract lines now have the same left edge.
+
+The corrected standalone PDF is `E:/MathModelingAssistant/data/paper-layout-7a37ac0de57f/paper/main-abstract-fixed.pdf`; its first-page screenshot is `E:/MathModelingAssistant/data/paper-layout-7a37ac0de57f/abstract-fixed-1.png`. No abstract wording changed. It remains nine pages, and rendered pages 2-9 are pixel-identical to the prior layout copy. The original accepted workspace remains unchanged.
+
+A real XeLaTeX regression asserts the live abstract width equals text width, font size is 12pt and paragraph indent is 24pt. Version-1 compatibility is also covered. The full suite passed **154 tests in 61.177 seconds**. Writing prompts select the project's pinned version rather than silently upgrading old tasks.
 
 ## Current Paper
 

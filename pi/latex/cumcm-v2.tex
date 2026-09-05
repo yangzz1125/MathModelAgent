@@ -1,0 +1,53 @@
+% Shared Pi CUMCM layout v2. Copy unchanged to paper/cumcm-layout.tex.
+% The master must use \documentclass[a4paper,12pt]{ctexart}.
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+\linespread{1.43}
+\pagestyle{plain}
+% Do not stretch inter-paragraph space to fill a page containing a large float.
+\AtBeginDocument{%
+  \raggedbottom
+  \setlength{\abovedisplayskip}{8pt plus 2pt minus 2pt}%
+  \setlength{\belowdisplayskip}{8pt plus 2pt minus 2pt}%
+  \setlength{\abovedisplayshortskip}{4pt plus 2pt minus 2pt}%
+  \setlength{\belowdisplayshortskip}{6pt plus 2pt minus 2pt}%
+}
+\ctexset{
+  section = {beforeskip=16pt, afterskip=8pt},
+  subsection = {beforeskip=12pt, afterskip=6pt},
+  subsubsection = {beforeskip=10pt, afterskip=5pt},
+}
+\setlength{\textfloatsep}{12pt plus 2pt minus 2pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{12pt plus 2pt minus 2pt}
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.7}
+\makeatletter
+\def\fps@figure{htbp}
+\def\fps@table{htbp}
+\makeatother
+% Anonymous title: no empty author/date rows from the default \maketitle.
+\newcommand{\papertitle}[1]{%
+  \thispagestyle{empty}%
+  \begin{center}
+    {\fontsize{17.3pt}{22pt}\selectfont\heiti #1\par}
+  \end{center}
+}
+% The stock article abstract is a smaller quotation with side margins.
+\renewenvironment{abstract}{%
+  \par\normalsize
+  \begin{center}{\heiti\abstractname}\end{center}
+  \setlength{\parindent}{2\ccwd}%
+  \noindent\hspace*{2\ccwd}\ignorespaces
+}{\par}
+% Separate front matter intentionally, not individual body sections/references.
+\newcommand{\papercontents}{%
+  \clearpage
+  \tableofcontents
+  \clearpage
+}

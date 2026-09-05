@@ -3,8 +3,10 @@
 import re
 from pathlib import Path
 
-LAYOUT_VERSION = "cumcm-v1"
-LAYOUT_SOURCE = Path(__file__).parent / "latex" / "cumcm-v1.tex"
+LAYOUT_VERSION = "cumcm-v2"
+LAYOUT_SOURCES = {version: Path(__file__).parent / "latex" / f"{version}.tex"
+                  for version in ("cumcm-v1", "cumcm-v2")}
+LAYOUT_SOURCE = LAYOUT_SOURCES[LAYOUT_VERSION]
 
 
 def paper_layout_policy(project: dict) -> str | None:
@@ -18,12 +20,12 @@ def paper_layout_policy(project: dict) -> str | None:
 def paper_layout_errors(workspace: Path, policy: str | None) -> list[str]:
     if not policy:
         return []
-    if policy != LAYOUT_VERSION:
+    if policy not in LAYOUT_SOURCES:
         return [f"paper_layout: unsupported layout contract {policy}"]
     paper = workspace / "paper"
     style = paper / "cumcm-layout.tex"
-    if not style.is_file() or style.read_bytes() != LAYOUT_SOURCE.read_bytes():
-        return ["paper_layout: copy pi/latex/cumcm-v1.tex unchanged to paper/cumcm-layout.tex"]
+    if not style.is_file() or style.read_bytes() != LAYOUT_SOURCES[policy].read_bytes():
+        return [f"paper_layout: copy pi/latex/{policy}.tex unchanged to paper/cumcm-layout.tex"]
     main = paper / "main.tex"
     if not main.is_file():
         return ["paper_layout: main.tex is required"]
