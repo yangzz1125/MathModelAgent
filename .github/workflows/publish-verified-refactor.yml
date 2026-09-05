@@ -1,0 +1,51 @@
+name: Publish verified Pi refactor
+on:
+  push:
+    branches: [pi-reliability-efficiency-refactor]
+    paths: [.github/workflows/publish-verified-refactor.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify immutable patch and apply to isolated checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          repo = 'yangzz1125/MathModelAgent'
+          chunks = ['ed1a118f7451e3263c183057e18500cc34a917b6','7b53e0c11b392ad6e7031c6ea6b325ad2b5bf7c0','512bfde7a553a50040de1ebe84ea875a6d7e47c0','9dae88096bdbeae33d069e2de154ca04b359b578','62a1c4a28512cab3377ffec976bd38a23df9dbde','c4036e1c7ee743a0199bb6e675f021d2801931a9','c0ee5b51ee8714eac7bbcfb5c4e006369d07e06c']
+          compressed = bytearray()
+          for sha in chunks:
+              request = urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  value = json.load(response)
+              data = base64.b64decode(value['content'])
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == sha
+              compressed.extend(data)
+          patch = lzma.decompress(compressed)
+          assert len(patch) == 202604
+          assert hashlib.sha256(patch).hexdigest() == '839bd1ec2daf25b59f2e5f0e9895e816680a87b0d0f7d81417fac7a6c61bf2d3'
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'verified.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(path)], check=True)
+          subprocess.run(['git','apply','--index',str(path)], check=True)
+          changed = subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines()
+          assert changed and all(p.startswith(('pi/','frontend/','scripts/','.github/actions/','.github/scripts/')) or p in {'.gitignore','PI.md','README.md'} for p in changed)
+          assert not any(p.startswith('.github/workflows/') for p in changed)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          subprocess.run(['python','-m','compileall','-q','pi','scripts/benchmark_pi.py'],check=True)
+          print('Verified and staged',len(changed),'files; no workflow or main-branch mutation in patch.')
+      - name: Publish without force
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(pi): bounded balanced workflow and Host-managed computation'
+          git push origin HEAD:refs/heads/pi-reliability-efficiency-refactor
+          git rev-parse HEAD
