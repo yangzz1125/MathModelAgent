@@ -2,6 +2,8 @@ name: Pi refactor validation
 on:
   push:
     branches: [pi-reliability-efficiency-refactor]
+  pull_request:
+    branches: [pi-integration]
   workflow_dispatch:
 permissions:
   contents: read
@@ -9,18 +11,64 @@ concurrency:
   group: pi-refactor-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  source:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      MPLBACKEND: Agg
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test dependencies
+        run: python -m pip install -r pi/requirements.txt httpx pytest
+      - name: Unit and integration regression tests
+        run: python -m pytest pi/tests -v --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pi-tests-${{ matrix.os }}-${{ matrix.python }}
+          path: test-results.xml
+          retention-days: 7
+  frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Archive tracked source only
-        run: git archive --format=zip --output=source.zip HEAD
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install and build
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+  support:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Small pure-Python wheels for offline local validation
+        run: python -m pip download --no-deps SciencePlots==2.2.2 adjustText==1.4.0 -d wheels
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-source-snapshot
-          path: source.zip
+          name: pi-validation-wheels
+          path: wheels/
           retention-days: 3
-          if-no-files-found: error
