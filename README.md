@@ -1,3 +1,5 @@
+> **Pi reliability/efficiency refactor branch:** new projects use balanced v4; existing projects keep their saved contracts. Setup and changes: [PI.md](PI.md) and [pi/REFACTOR.md](pi/REFACTOR.md). The upstream project introduction below remains unchanged.
+
 <h1 align="center">🤖 MathModelAgent 📐</h1>
 <p align="center">
     <img src="./docs/icon.png" height="250px">

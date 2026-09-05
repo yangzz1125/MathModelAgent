@@ -15,6 +15,7 @@ export interface ProjectSummary {
 }
 
 export interface StartProjectOptions {
+    workflow_mode?: "balanced" | "strict";
 	question: string;
 	problem_file: string;
 	competition: string;

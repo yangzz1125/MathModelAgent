@@ -57,7 +57,7 @@ class FigureStackTest(unittest.TestCase):
 
     def test_pinned_stack_and_chinese_font_are_available(self) -> None:
         self.assertEqual(figure_stack_errors("Chinese"), [])
-        self.assertIn(self.font, ("Noto Serif SC", "Source Han Serif SC", "SimSun"))
+        self.assertIn(self.font, ("Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun"))
 
     def test_official_apis_render_eight_basic_families(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,3 +1,4 @@
+import { upsertMessage, mergeHistory } from "@/utils/messageIndex";
 import { getTaskMessages } from "@/apis/commonApi";
 import {
 	cancelTask as cancelTaskAPI,
@@ -36,7 +37,7 @@ export const useTaskStore = defineStore("task", () => {
 		return messagesByTask.value[currentTaskId.value] ?? [];
 	});
 	/** 已处理的消息ID集合（用于去重） */
-	const seenMessageIdsByTask = new Map<string, Set<string>>();
+	const positionsByTask = new Map<string, Map<string, number>>();
 
 	/** WebSocket 实例 */
 	let ws: TaskWebSocket | null = null;
@@ -59,32 +60,11 @@ export const useTaskStore = defineStore("task", () => {
 		() =>
 			wsStatus.value === "connected" &&
 			runtimeStatus.value !== null &&
-			contractVersion.value !== 3 &&
+			contractVersion.value !== 3 && contractVersion.value !== 4 &&
 			["starting", "running", "waiting"].includes(runtimeStatus.value),
 	);
 
 	// ---- Helpers ----
-
-	/** 获取消息时间戳 */
-	function getMessageTimestamp(message: Message): number | null {
-		if (!message.created_at) {
-			return null;
-		}
-		const timestamp = Date.parse(message.created_at);
-		return Number.isNaN(timestamp) ? null : timestamp;
-	}
-
-	/** 按时间戳排序消息 */
-	function sortMessages(items: Message[]) {
-		return [...items].sort((left, right) => {
-			const leftTs = getMessageTimestamp(left);
-			const rightTs = getMessageTimestamp(right);
-			if (leftTs == null || rightTs == null || leftTs === rightTs) {
-				return 0;
-			}
-			return leftTs - rightTs;
-		});
-	}
 
 	/** 类型守卫：判断是否为有效的消息对象 */
 	function isMessagePayload(payload: unknown): payload is Message {
@@ -112,52 +92,27 @@ export const useTaskStore = defineStore("task", () => {
 		if (!messagesByTask.value[taskId]) {
 			messagesByTask.value[taskId] = [];
 		}
-		if (!seenMessageIdsByTask.has(taskId)) {
-			seenMessageIdsByTask.set(taskId, new Set());
-		}
+
 	}
 
 	/** 追加消息（自动去重和排序） */
 	function appendMessage(taskId: string, message: Message) {
-		ensureTaskBucket(taskId);
-		const seenIds = seenMessageIdsByTask.get(taskId);
-		if (message.id && seenIds?.has(message.id)) {
-			messagesByTask.value[taskId] = sortMessages(
-				messagesByTask.value[taskId].map((existing) =>
-					existing.id === message.id ? message : existing,
-				),
-			);
-			return;
-		}
-		if (message.id) {
-			seenIds?.add(message.id);
-		}
-		messagesByTask.value[taskId] = sortMessages([
-			...messagesByTask.value[taskId],
-			message,
-		]);
-	}
+        ensureTaskBucket(taskId);
+        const rows = messagesByTask.value[taskId];
+        let index = positionsByTask.get(taskId);
+        if (!index || index.size !== rows.length) {
+            index = new Map(rows.map((item, i) => [item.id, i]));
+            positionsByTask.set(taskId, index);
+        }
+        upsertMessage(rows, index, message);
+    }
 
-	/** 合并历史消息（用于加载历史记录） */
-	function mergeMessages(taskId: string, incomingMessages: Message[]) {
-		ensureTaskBucket(taskId);
-		const existingMessages = messagesByTask.value[taskId];
-		const mergedById = new Map<string, Message>();
-
-		for (const message of [...existingMessages, ...incomingMessages]) {
-			if (!message.id) {
-				continue;
-			}
-			mergedById.set(message.id, message);
-		}
-
-		const mergedMessages = Array.from(mergedById.values());
-		messagesByTask.value[taskId] = sortMessages(mergedMessages);
-		seenMessageIdsByTask.set(
-			taskId,
-			new Set(mergedMessages.map((message) => message.id)),
-		);
-	}
+    function mergeMessages(taskId: string, incomingMessages: Message[]) {
+        ensureTaskBucket(taskId);
+        const rows = mergeHistory(messagesByTask.value[taskId], incomingMessages);
+        messagesByTask.value[taskId] = rows;
+        positionsByTask.set(taskId, new Map(rows.map((item, i) => [item.id, i])));
+    }
 
 	// ---- Actions ----
 

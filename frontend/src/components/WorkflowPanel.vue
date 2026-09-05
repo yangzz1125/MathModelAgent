@@ -29,6 +29,10 @@ const statusLabel = computed(() => {
 			return "等待后续指令";
 		case "completed":
 			return "已完成";
+		case "completed_with_warnings":
+            return "已完成（有警告）";
+        case "partial":
+            return "部分完成";
 		case "cancelled":
 			return "已停止";
 		case "failed":
@@ -73,13 +77,20 @@ function reviewLabel(value?: string) {
           'text-blue-600': status?.status === 'running' || status?.status === 'starting',
           'text-green-600': status?.status === 'completed',
           'text-red-600': status?.status === 'failed',
-          'text-amber-600': status?.status === 'paused',
+          'text-amber-600': ['paused', 'partial', 'completed_with_warnings'].includes(status?.status || ''),
           'text-gray-600': status?.status === 'waiting' || status?.status === 'cancelled',
         }">
           {{ statusLabel }}
         </span>
       </header>
 
+      <div v-if="status?.runtime_metrics" class="border-b px-4 py-2 text-xs text-gray-500">
+        Prompts {{ status.runtime_metrics.prompts ?? 0 }}
+        <span> | Restarts {{ status.runtime_metrics.restarts ?? 0 }}</span>
+        <span> | Host jobs {{ status.compute_jobs ?? 0 }}</span>
+        <span v-if="status.cache_hits"> | Cache hits {{ status.cache_hits }}</span>
+        <span v-if="status.runtime_metrics.cleanup_required" class="text-red-600"> | Cleanup required</span>
+      </div>
       <ScrollArea class="flex-1 min-h-0">
         <ol class="divide-y px-4">
           <li v-for="(phase, index) in status?.phases || []" :key="phase.id"

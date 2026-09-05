@@ -1,0 +1,4 @@
+{"cases":[
+  {"id":"single-bakery","files":["../tests/fixtures/single-bakery/problem.md"],"competition":"MCM","language":"English"},
+  {"id":"simple-bakery","files":["../tests/fixtures/simple-bakery/problem.md","../tests/fixtures/simple-bakery/resource_scenarios.csv"],"competition":"MCM","language":"English"}
+]}

@@ -240,15 +240,14 @@ class WorkflowRegressionTest(unittest.IsolatedAsyncioTestCase):
             runtime = self.fixture._runtime_at_method_audit(directory)
             runtime.prompt = bridge.TaskRuntime.prompt.__get__(runtime)
             runtime.send_rpc = AsyncMock()
-            runtime.pause = AsyncMock()
-            await runtime.prompt('request', initial=True)
-            request_id = runtime.send_rpc.call_args.args[0]['id']
-            await runtime._handle_event({'type': 'response', 'command': 'prompt', 'id': 'stale', 'success': True})
-            self.assertIn(request_id, runtime._prompt_watchdogs)
-            await runtime._handle_event({'type': 'response', 'command': 'prompt', 'id': request_id, 'success': False, 'error': 'missing credentials'})
-            await asyncio.sleep(0)
-            runtime.pause.assert_awaited_once_with('rpc_error: missing credentials')
-            self.assertFalse(runtime._prompt_watchdogs)
+            with patch.object(runtime, '_request_runtime_recovery') as recover:
+                await runtime.prompt('request', initial=True)
+                request_id = runtime.send_rpc.call_args.args[0]['id']
+                await runtime._handle_event({'type':'response', 'command':'prompt', 'id':'stale', 'success':True})
+                self.assertFalse(runtime._safety_state().turn.acknowledged)
+                await runtime._handle_event({'type':'response', 'command':'prompt', 'id':request_id, 'success':False, 'error':'missing credentials'})
+                recover.assert_called_once()
+                self.assertIn('missing credentials', recover.call_args.args[0])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows Job Object lifecycle')
     async def test_real_process_pause_resume_without_model_calls(self):
@@ -269,7 +268,8 @@ class WorkflowRegressionTest(unittest.IsolatedAsyncioTestCase):
                 if '--mode' in args:
                     return await spawn(sys.executable, '-u', '-c', fake_rpc, **kwargs)
                 return await spawn(*args, **kwargs)
-            with patch.object(bridge.asyncio, 'create_subprocess_exec', side_effect=fake_pi):
+            real_which = bridge.shutil.which
+            with patch.object(bridge.shutil, 'which', side_effect=lambda name: 'scripted-pi' if name in {'pi', 'pi.cmd'} else real_which(name)), patch.object(bridge.asyncio, 'create_subprocess_exec', side_effect=fake_pi):
                 try:
                     runtime.runner = asyncio.create_task(runtime.run('fake prompt'))
                     await asyncio.wait_for(acknowledged.wait(), timeout=10)

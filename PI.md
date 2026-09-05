@@ -1,3 +1,7 @@
+# Balanced reliability/efficiency branch
+
+New projects default to the bounded **balanced v4** workflow. Use `workflow_mode: "strict"` for original v3 behavior. Existing workspaces retain their saved contracts. See [pi/REFACTOR.md](pi/REFACTOR.md) for architecture, limits, outcomes and real-model benchmarks. The v3 details below describe strict/legacy operation.
+
 # MathModelAgent with Pi
 
 This branch uses Pi as the Agent Skills harness. Claude Code is not required.

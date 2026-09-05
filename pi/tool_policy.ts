@@ -1,7 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const REVIEW_TOOLS = ["read", "grep", "find", "ls"];
-const WORK_TOOLS = ["read", "bash", "edit", "write"];
+const WORK_TOOLS = process.env.MATHMODEL_HOST_COMPUTE === "1"
+    ? ["read", "grep", "find", "ls", "edit", "write"]
+    : ["read", "bash", "edit", "write"];
 
 export default function mathModelToolPolicy(pi: ExtensionAPI) {
 	const activate = (mode: "review" | "work") => {

@@ -249,8 +249,8 @@ class WindowsHostBoundary:
             self.recover(self.task_id, self.workspace)
             project = json.loads(project_path.read_text(encoding="utf-8"))
             ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-        if (project.get("workflow") or {}).get("contract_version") != 3:
-            raise RuntimeError("WindowsHostBoundary is only for contract-v3")
+        if (project.get("workflow") or {}).get("contract_version") not in {3, 4}:
+            raise RuntimeError("WindowsHostBoundary requires contract-v3 or v4")
         candidates = [
             value
             for value in (_valid_envelope(path) for path in self.journal_paths)

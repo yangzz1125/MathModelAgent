@@ -1,6 +1,10 @@
 """Thin FastAPI bridge between the MathModelAgent Vue UI and Pi RPC mode."""
 
 from __future__ import annotations
+import signal
+from pi.runtime_supervision import RuntimeSupervisionMixin
+from pi.efficient_workflow import EfficientWorkflowMixin, initial_balanced_workflow, verify_project, sign_project
+from pi.runtime_support import atomic_json
 
 import asyncio
 import hashlib
@@ -19,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
@@ -655,6 +659,7 @@ async def _initialize_project(
 class StartProjectRequest(BaseModel):
     """Configuration frozen when a ready project starts."""
 
+    workflow_mode: Literal["balanced", "strict"] = "balanced"
     question: str = ""
     problem_file: str = ""
     competition: str = "CUMCM"
@@ -678,7 +683,7 @@ async def _start_project(
         raise HTTPException(status_code=400, detail="Unsupported paper engine")
     figure_errors = figure_stack_errors(request.language)
     environment_errors = _document_stack_errors(request.paper_engine)
-    if figure_errors or environment_errors:
+    if request.workflow_mode == "strict" and (figure_errors or environment_errors):
         raise HTTPException(
             status_code=503, detail="; ".join(figure_errors + environment_errors)
         )
@@ -742,6 +747,9 @@ async def _start_project(
         "problems": {},
         "plan_version": 0,
     })
+    if request.workflow_mode == "balanced":
+        workflow = initial_balanced_workflow(workflow["profiles"], runtime.workspace)
+        workflow["warnings"].extend(figure_errors + environment_errors)
     workflow["phases"][0]["started_at"] = runtime.started_at
     workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
     project.update(
@@ -763,7 +771,7 @@ async def _start_project(
             "workflow": workflow,
         }
     )
-    _write_json(project_path, project)
+    runtime._save_project(project)
     runtime.set_status("starting")
     await runtime.publish(
         _message("user", request.question.strip() or f"使用 {problem_file} 开始完整建模")
@@ -776,11 +784,13 @@ async def _start_project(
         notes=request.question.strip(),
         evidence_paths=runtime._stage_context_paths(project),
     )
+    if workflow.get("contract_version") == 4:
+        prompt = runtime._v4_prompt(runtime._project())
     runtime.runner = asyncio.create_task(runtime.run(prompt))
 
 
 @dataclass
-class TaskRuntime:
+class TaskRuntime(EfficientWorkflowMixin, RuntimeSupervisionMixin):
     """One persistent Pi RPC process and its browser-facing state."""
 
     task_id: str
@@ -827,33 +837,12 @@ class TaskRuntime:
         if not project_path.is_file():
             return
         try:
-            project = json.loads(project_path.read_text(encoding="utf-8"))
+            project = self._project()
             project["status"] = status
             self._save_project(project)
         except (OSError, json.JSONDecodeError):
             pass
 
-    async def publish(self, message: dict[str, Any], *, persist: bool = True) -> None:
-        """Upsert one message, persist stable snapshots, and broadcast it."""
-        async with self._write_lock:
-            for index, existing in enumerate(self.messages):
-                if existing.get("id") == message.get("id"):
-                    self.messages[index] = message
-                    break
-            else:
-                self.messages.append(message)
-            if persist:
-                snapshot = json.dumps(self.messages, ensure_ascii=False, indent=2)
-                await asyncio.to_thread(self._write_messages, snapshot)
-
-        stale = []
-        for client in tuple(self.clients):
-            try:
-                await client.send_json(message)
-            except Exception:
-                stale.append(client)
-        for client in stale:
-            self.clients.discard(client)
 
     def _write_messages(self, snapshot: str) -> None:
         self.message_file.parent.mkdir(parents=True, exist_ok=True)
@@ -876,77 +865,17 @@ class TaskRuntime:
     async def system(self, content: str, kind: str = "info") -> None:
         await self.publish(_message("system", content, type=kind))
 
-    async def send_rpc(self, payload: dict[str, Any]) -> None:
-        if not self.process or not self.process.stdin:
-            raise RuntimeError("Pi process is not running")
-        self.process.stdin.write(
-            (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-        )
-        await self.process.stdin.drain()
 
-    async def rpc_command(
-        self, payload: dict[str, Any], *, timeout: float = 15
-    ) -> dict[str, Any]:
-        command = str(payload.get("type") or "")
-        if not command:
-            raise ValueError("RPC command requires a type")
-        future: asyncio.Future[dict[str, Any]] = (
-            asyncio.get_running_loop().create_future()
-        )
-        request_id = uuid.uuid4().hex
-        self._pending_rpc[request_id] = future
-        try:
-            await self.send_rpc({**payload, "id": request_id})
-            response = await asyncio.wait_for(future, timeout=timeout)
-        finally:
-            self._pending_rpc.pop(request_id, None)
-        if not response.get("success", False):
-            raise RuntimeError(
-                f"Pi {command} failed: {response.get('error', 'unknown error')}"
-            )
-        return response
 
-    async def prompt(self, text: str, *, initial: bool = False) -> None:
-        if self._stopping or self.status in {"paused", "cancelled", "failed", "completed"}:
-            raise asyncio.CancelledError
-        self._last_assistant_text = ""
-        payload: dict[str, Any] = {
-            "id": uuid.uuid4().hex,
-            "type": "prompt",
-            "message": text,
-        }
-        if not initial and self.status == "running":
-            payload["streamingBehavior"] = "steer"
-        self.set_status("running")
-        request_id = payload["id"]
-        self._prompt_watchdogs[request_id] = asyncio.create_task(self._watch_prompt(request_id))
-        try:
-            await self.send_rpc(payload)
-        except BaseException:
-            watchdog = self._prompt_watchdogs.pop(request_id, None)
-            if watchdog:
-                watchdog.cancel()
-            raise
 
-    async def _watch_prompt(self, request_id: str) -> None:
-        await asyncio.sleep(30)
-        self._prompt_watchdogs.pop(request_id, None)
-        await self._pause_rpc_failure("Pi prompt acknowledgement timed out")
 
-    async def _pause_rpc_failure(self, error: str) -> None:
-        if self.status not in {"starting", "running"} or self._stopping:
-            return
-        try:
-            await self.pause(f"rpc_error: {error}")
-        except (HTTPException, RuntimeError, OSError) as exc:
-            await self.system(f"Pi RPC failure; cleanup requires attention: {exc}", "error")
 
     async def terminate(self) -> None:
         """Single-flight teardown shared by control requests and runner finalization."""
         async with self._terminate_lock:
             await self._terminate_process()
 
-    async def _terminate_process(self) -> None:
+    async def _terminate_process_core(self) -> None:
         """Terminate the RPC wrapper and its Pi/Node descendants."""
         for watchdog in self._prompt_watchdogs.values():
             if watchdog is not asyncio.current_task():
@@ -981,7 +910,12 @@ class TaskRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            _, error = await killer.communicate()
+            try:
+                _, error = await asyncio.wait_for(killer.communicate(), timeout=5)
+            except asyncio.TimeoutError as exc:
+                killer.kill()
+                await asyncio.wait_for(killer.wait(), timeout=2)
+                raise RuntimeError("taskkill did not confirm process-tree cleanup") from exc
             if killer.returncode != 0:
                 # A naturally exited wrapper can race taskkill. Confirm exit, never
                 # infer success from localized error text or ignore access denial.
@@ -992,12 +926,24 @@ class TaskRuntime:
                         f"Pi process-tree termination failed: {error.decode(errors='replace')}"
                     ) from exc
         else:
-            self.process.terminate()
+            try:
+                if os.getpgid(self.process.pid) == self.process.pid:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                else:
+                    self.process.terminate()
+            except ProcessLookupError:
+                pass
         try:
             await asyncio.wait_for(self.process.wait(), timeout=5)
         except asyncio.TimeoutError:
-            self.process.kill()
-            await self.process.wait()
+            try:
+                if os.name != "nt" and os.getpgid(self.process.pid) == self.process.pid:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                else:
+                    self.process.kill()
+            except ProcessLookupError:
+                pass
+            await asyncio.wait_for(self.process.wait(), timeout=5)
         self._release_host_state()
 
     async def pause(self, reason: str = "user") -> None:
@@ -1037,16 +983,6 @@ class TaskRuntime:
         await self.system("任务已持久化暂停，可以稍后从当前阶段恢复", "warning")
         await self._stop_runtime()
 
-    async def _quiesce_transitions(self) -> None:
-        rendering = self._host_render_cancel
-        if rendering is not None:
-            rendering.set()
-        transitions = [task for task in self._transitions if task is not asyncio.current_task() and not task.done()]
-        if rendering is None:
-            for task in transitions:
-                task.cancel()
-        if transitions:
-            await asyncio.gather(*transitions, return_exceptions=True)
 
     async def _stop_runtime(self) -> None:
         await self._quiesce_transitions()
@@ -1070,6 +1006,8 @@ class TaskRuntime:
 
     def _profile_for_resume(self, project: dict[str, Any]) -> str:
         workflow = project["workflow"]
+        if workflow.get("contract_version") == 4:
+            return self._v4_profile(workflow)
         stage = str(workflow.get("current") or "")
         mode = str(workflow.get("mode") or "run")
         if stage in {"planning", "plan_audit", "paper_planning", "verify", "inventory", "inventory_audit"}:
@@ -1131,6 +1069,8 @@ class TaskRuntime:
 
     def _resume_prompt(self, project: dict[str, Any]) -> str:
         workflow = project["workflow"]
+        if workflow.get("contract_version") == 4:
+            return self._v4_prompt(project)
         stage = str(workflow.get("current") or "")
         mode = str(workflow.get("mode") or "run")
         phase = self._current_phase(workflow) or {}
@@ -1294,6 +1234,8 @@ class TaskRuntime:
             await self._resume()
 
     async def _resume(self) -> None:
+        if self._safety_state().cleanup_required:
+            raise HTTPException(status_code=409, detail="Old runtime cleanup is unconfirmed; resume is blocked")
         if self.status != "paused":
             raise HTTPException(status_code=409, detail="Task is not paused")
         if (self.process and self.process.returncode is None) or (self.runner and not self.runner.done()):
@@ -1335,7 +1277,7 @@ class TaskRuntime:
             await self.system("任务已停止", "warning")
             await self._stop_runtime()
 
-    async def run(self, prompt: str) -> None:
+    async def _run_core(self, prompt: str) -> None:
         """Spawn Pi, send the workflow prompt, and translate RPC events."""
         if self._stopping:
             return
@@ -1356,7 +1298,7 @@ class TaskRuntime:
             "--skill",
             str(PI_SKILLS),
             "--append-system-prompt",
-            str(ENTRY_SKILL),
+            str(ROOT / "pi" / "BALANCED.md" if (self._project().get("workflow") or {}).get("contract_version") == 4 else ENTRY_SKILL),
             "--extension",
             str(TOOL_POLICY_EXTENSION),
             "--session-dir",
@@ -1390,13 +1332,18 @@ class TaskRuntime:
                 "MATHMODEL_TOOL_POLICY_TOKEN": self._tool_policy_token,
             }
         )
-        contract_v3 = (self._project().get("workflow") or {}).get("contract_version") == 3
+        runtime_version = (self._project().get("workflow") or {}).get("contract_version")
+        if runtime_version == 4:
+            environment["MATHMODEL_HOST_COMPUTE"] = "1"
+        contract_v3 = runtime_version in {3, 4}
         creationflags = (
             CREATE_NO_WINDOW | (CREATE_SUSPENDED if contract_v3 else 0)
             if os.name == "nt"
             else 0
         )
 
+        stderr_task = None
+        stdout_task = None
         try:
             self._acquire_host_state()
             self.process = await asyncio.create_subprocess_exec(
@@ -1408,7 +1355,9 @@ class TaskRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 limit=RPC_STREAM_LIMIT_BYTES,
                 creationflags=creationflags,
+                start_new_session=(os.name != "nt"),
             )
+            self._safety_state().posix_pgid = self.process.pid if os.name != "nt" else None
             if self._stopping:
                 return
             project = self._project()
@@ -1421,14 +1370,22 @@ class TaskRuntime:
             await self.system("Pi 已启动，正在执行 MathModelAgent 全流程")
             stderr_task = asyncio.create_task(self._read_stderr())
             await self.send_rpc({"id": "initial-state", "type": "get_state"})
-            await self.prompt(prompt, initial=True)
-            await self._read_stdout()
-            await stderr_task
+            stdout_task = asyncio.create_task(self._read_stdout())
+            current = self._project().get("workflow") or {}
+            if current.get("contract_version") == 4 and current.get("mode") in {"compute", "compile"}:
+                transition = asyncio.create_task(self._v4_resume_host())
+                self._transitions.add(transition)
+                transition.add_done_callback(self._transitions.discard)
+            else:
+                await self.prompt(prompt, initial=True)
+            await stdout_task
+            await asyncio.wait_for(stderr_task, timeout=5)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self._stopping:
                 return
+            self._safety_state().exit_error = "bridge_error: " + str(exc)
             try:
                 project = self._project()
                 workflow = project.get("workflow")
@@ -1452,19 +1409,17 @@ class TaskRuntime:
             except Exception:
                 self.set_status("failed")
         finally:
+            if stdout_task is not None and not stdout_task.done():
+                stdout_task.cancel()
+                await asyncio.gather(stdout_task, return_exceptions=True)
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
             await self.terminate()
-            if self.status not in {"completed", "cancelled", "failed", "paused"}:
+            if self.status not in {"completed", "completed_with_warnings", "partial", "cancelled", "failed", "paused"}:
                 self.set_status("failed")
                 await self.system("Pi 进程意外退出", "error")
 
-    async def _read_stdout(self) -> None:
-        assert self.process and self.process.stdout
-        while line := await self.process.stdout.readline():
-            try:
-                event = json.loads(line.decode("utf-8").rstrip("\r\n"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            await self._handle_event(event)
 
     async def _read_stderr(self) -> None:
         assert self.process and self.process.stderr
@@ -1489,7 +1444,7 @@ class TaskRuntime:
         except (asyncio.CancelledError, RuntimeError):
             pass
 
-    async def _handle_event(self, event: dict[str, Any]) -> None:
+    async def _handle_event_core(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
         if event_type == "response":
             request_id = str(event.get("id") or "")
@@ -1648,19 +1603,22 @@ class TaskRuntime:
             )
 
     def _project(self) -> dict[str, Any]:
-        return json.loads((self.workspace / "project.json").read_text(encoding="utf-8"))
+        project = json.loads((self.workspace / "project.json").read_text(encoding="utf-8"))
+        if (project.get("workflow") or {}).get("contract_version") == 4:
+            verify_project(self.task_id, project)
+        return project
 
-    def _save_project(self, project: dict[str, Any]) -> None:
+    def _save_project_core(self, project: dict[str, Any]) -> None:
         if self._host_boundary:
             self._host_boundary.save_project(project)
         else:
-            _write_json(self.workspace / "project.json", project)
+            atomic_json(self.workspace / "project.json", project)
 
     def _acquire_host_state(self) -> None:
         if self._host_boundary:
             return
         workflow = self._project().get("workflow") or {}
-        if workflow.get("contract_version") != 3:
+        if os.name != "nt" or workflow.get("contract_version") not in {3, 4}:
             return
         boundary = WindowsHostBoundary(self.task_id, self.workspace)
         boundary.acquire()
@@ -1957,6 +1915,8 @@ class TaskRuntime:
             return None
 
     def _reviewer_capability(self, workflow: dict[str, Any]) -> bool:
+        if workflow.get("contract_version") == 4:
+            return workflow.get("mode") in {"scientific_review", "document_review"}
         return str(workflow.get("current") or "") == "verify" or str(
             workflow.get("mode") or ""
         ) in {
@@ -1993,6 +1953,8 @@ class TaskRuntime:
 
     def _prompt_for_current(self, project: dict[str, Any]) -> str:
         workflow = project["workflow"]
+        if workflow.get("contract_version") == 4:
+            return self._v4_prompt(project)
         stage = str(workflow["current"])
         mode = str(workflow.get("mode") or "run")
         if mode in {
@@ -2248,7 +2210,7 @@ class TaskRuntime:
             return True
         return False
 
-    async def _wait_with_errors(self, errors: list[str]) -> None:
+    async def _wait_with_errors_core(self, errors: list[str]) -> None:
         project = self._project()
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
@@ -3615,7 +3577,7 @@ class TaskRuntime:
         finally:
             self._transitions.discard(task)
 
-    async def _advance_settled(self) -> None:
+    async def _advance_legacy_settled(self) -> None:
         async with self._transition_lock:
             if self._stopping or self.status in {"cancelled", "failed", "completed", "paused"}:
                 return
@@ -3685,7 +3647,7 @@ def _runtime(task_id: str) -> TaskRuntime:
         except (OSError, RuntimeError, json.JSONDecodeError):
             pass
         try:
-            project = json.loads(project_path.read_text(encoding="utf-8"))
+            project = runtime._project()
             runtime.status = str(project.get("status") or runtime.status)
             runtime.started_at = str(project.get("started_at") or runtime.started_at)
             runtime.model = str(project.get("model") or runtime.model)
@@ -3721,7 +3683,7 @@ def _runtime(task_id: str) -> TaskRuntime:
             )
             if (
                 isinstance(workflow, dict)
-                and workflow.get("contract_version") in {2, 3}
+                and workflow.get("contract_version") in {2, 3, 4}
                 and (orphaned_active or recoverable_bridge_failure)
             ):
                 runtime.status = "paused"
@@ -3736,7 +3698,7 @@ def _runtime(task_id: str) -> TaskRuntime:
                 if phase:
                     phase["status_before_pause"] = phase.get("status") or "running"
                     phase["status"] = "paused"
-                _write_json(project_path, project)
+                runtime._save_project(project)
         except (OSError, json.JSONDecodeError):
             pass
     TASKS[task_id] = runtime
@@ -3945,7 +3907,7 @@ async def task_socket(websocket: WebSocket, task_id: str) -> None:
             if not text:
                 continue
             if not _freeform_prompt_allowed(runtime):
-                await websocket.send_json(_message(
+                runtime._safety_fanout().offer(websocket, _message(
                     "system",
                     "Contract-v3 自治任务不接受自由指令，请使用暂停、恢复或取消控制。",
                     type="warning",
@@ -3959,7 +3921,7 @@ async def task_socket(websocket: WebSocket, task_id: str) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        runtime.clients.discard(websocket)
+        runtime._safety_fanout().remove(websocket)
 
 
 @app.post("/modeling/{task_id}/pause")
@@ -4052,7 +4014,11 @@ async def task_status(task_id: str, request: Request) -> dict[str, Any]:
         "pause_count": int(project.get("pause_count") or 0),
         "resume_count": int(project.get("resume_count") or 0),
         "can_pause": runtime.status in {"starting", "running"},
-        "can_resume": runtime.status == "paused" and isinstance(workflow, dict),
+        "can_resume": runtime.status == "paused" and isinstance(workflow, dict) and not runtime._safety_state().cleanup_required,
+        "runtime_metrics": project.get("runtime_metrics", {}),
+        "delivery_status": project.get("delivery_status"),
+        "compute_jobs": workflow.get("compute_jobs", 0) if isinstance(workflow, dict) else 0,
+        "cache_hits": workflow.get("cache_hits", 0) if isinstance(workflow, dict) else 0,
         "phases": phases,
         "paper_url": paper_url,
     }

@@ -39,6 +39,8 @@ export function getTaskStatus(task_id: string) {
 			| "paused"
 			| "waiting"
 			| "completed"
+            | "completed_with_warnings"
+            | "partial"
 			| "cancelled"
 			| "failed"
 			| "stopped";
@@ -58,6 +60,10 @@ export function getTaskStatus(task_id: string) {
 		resume_count: number;
 		can_pause: boolean;
 		can_resume: boolean;
+        delivery_status?: string;
+        runtime_metrics?: { prompts?: number; restarts?: number; active_seconds?: number; cleanup_required?: boolean };
+        compute_jobs?: number;
+        cache_hits?: number;
 		started_at: string;
 		paper_url: string | null;
 		phases: {

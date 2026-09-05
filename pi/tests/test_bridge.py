@@ -2252,7 +2252,7 @@ class ProjectInitializationTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     await bridge._start_project(
                         runtime,
-                        bridge.StartProjectRequest(
+                        bridge.StartProjectRequest(workflow_mode="strict",
                             problem_file=str(summary["problem_file"]),
                             language="Chinese",
                         ),
@@ -3784,6 +3784,7 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
             async def receive_json(self) -> dict[str, str]:
                 if self.received:
+                    await asyncio.sleep(0.01)  # Let the independent sender flush.
                     raise bridge.WebSocketDisconnect()
                 self.received = True
                 return {"type": "prompt", "id": "message", "message": "steer"}
@@ -3894,6 +3895,7 @@ class TaskRuntimeTest(unittest.IsolatedAsyncioTestCase):
             runtime = TaskRuntime("a" * 12, Path(directory))
             await runtime.publish({"id": "one", "content": "first"})
             await runtime.publish({"id": "one", "content": "updated"})
+            await runtime._flush_message_snapshots()
 
             self.assertEqual(runtime.messages, [{"id": "one", "content": "updated"}])
             self.assertIn("updated", runtime.message_file.read_text(encoding="utf-8"))

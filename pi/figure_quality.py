@@ -21,7 +21,7 @@ PACKAGE_VERSIONS = {
     "seaborn": "0.13.2",
     "adjustText": "1.4.0",
 }
-CHINESE_FONTS = ("Noto Serif SC", "Source Han Serif SC", "SimSun")
+CHINESE_FONTS = ("Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun")
 DEFAULT_STYLE_STACK = ("science", "no-latex", "bright")
 SPECIALIZED_TEMPLATE_IDS = {
     "multiclass-shap-combo",
