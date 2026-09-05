@@ -25,6 +25,12 @@ jobs:
           with urllib.request.urlopen(request, timeout=30) as response:
               data = base64.b64decode(json.load(response)['content'])
           assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == sha
+          old = "assert git('rev-parse','HEAD^').stdout.strip()==EXPECTED,'Isolated branch moved; re-review before syncing'"
+          new = "allowed_transport={'.github/workflows/sync-paper-layout.yml','.github/workflows/pi-publish-recovery.yml'}\nassert set(git('diff','--name-only',EXPECTED,'HEAD').stdout.splitlines()) <= allowed_transport, 'Source changed; re-review before syncing'"
+          text = data.decode('utf-8')
+          assert text.count(old) == 1
+          data = text.replace(old,new,1).encode('utf-8')
+          assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == '13a1d364b899d2c55295144eb35f869b3c2a65a1'
           script = pathlib.Path(os.environ['RUNNER_TEMP']) / 'sync-reviewed-layout.py'
           script.write_bytes(data)
           subprocess.run(['python',str(script)],check=True)
