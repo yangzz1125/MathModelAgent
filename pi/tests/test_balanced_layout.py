@@ -13,7 +13,7 @@ class BalancedLayoutTests(unittest.IsolatedAsyncioTestCase):
             runtime, _ = await bridge._initialize_project(question='A modeling question.', source_folder='', files=[], relative_paths=[])
             runtime.run = AsyncMock()
             try:
-                with patch('pi.bridge.figure_stack_errors', return_value=[]), patch('pi.bridge.scientific_environment_errors', return_value=[]), patch('pi.bridge._document_stack_errors', return_value=[]):
+                with patch('pi.bridge.figure_stack_errors', return_value=[]), patch('pi.bridge._document_stack_errors', return_value=[]):
                     await bridge._start_project(runtime, bridge.StartProjectRequest(competition='CUMCM', language='Chinese', paper_engine='LaTeX', planner_model='openai/gpt-5.6-sol', worker_model='openai/gpt-5.6-luna'))
                 await runtime.runner
                 self.assertEqual(runtime._project()['workflow']['paper_layout'], LAYOUT_VERSION)
