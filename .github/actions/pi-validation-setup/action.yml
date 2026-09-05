@@ -19,7 +19,7 @@ runs:
       shell: bash
       run: |
         tlmgr update --self
-        tlmgr install xetex fontspec collection-latexrecommended
+        tlmgr install xetex fontspec collection-latexrecommended ctex fandol xecjk zhnumber
     - name: TeX packages for Windows regression fixtures
       if: runner.os == 'Windows'
       shell: pwsh
@@ -27,7 +27,7 @@ runs:
         $tlmgr = (Get-Command tlmgr.bat -ErrorAction Stop).Source
         & $tlmgr update --self
         if ($LASTEXITCODE -ne 0) { throw 'TeX package manager update failed' }
-        & $tlmgr install xetex fontspec collection-latexrecommended
+        & $tlmgr install xetex fontspec collection-latexrecommended ctex fandol xecjk zhnumber
         if ($LASTEXITCODE -ne 0) { throw 'TeX regression package installation failed' }
     - name: Poppler on Linux
       if: runner.os == 'Linux'

@@ -750,6 +750,9 @@ async def _start_project(
     if request.workflow_mode == "balanced":
         workflow = initial_balanced_workflow(workflow["profiles"], runtime.workspace)
         workflow["warnings"].extend(figure_errors + environment_errors)
+    from pi.paper_layout import paper_layout_policy
+    workflow["paper_layout"] = paper_layout_policy({**project, "competition": request.competition,
+        "language": request.language, "paper_engine": request.paper_engine})
     workflow["phases"][0]["started_at"] = runtime.started_at
     workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
     project.update(
@@ -2088,6 +2091,9 @@ class TaskRuntime(EfficientWorkflowMixin, RuntimeSupervisionMixin):
             errors.append("performance_budget: command exceeded runtime_limit_seconds")
             self._budget_exceeded = False
         plan = None
+        if stage in {"writing", "verify"}:
+            from pi.paper_layout import paper_layout_errors
+            errors.extend(paper_layout_errors(self.workspace, workflow.get("paper_layout")))
         if stage == "inventory":
             version = int(workflow.get("inventory_version") or 1)
             report = self.workspace / "reports" / f"PROBLEM_INVENTORY_v{version}.md"

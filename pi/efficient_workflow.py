@@ -66,6 +66,9 @@ class EfficientWorkflowMixin:
             f"Read original problem: {project['problem_file']}; data index: input_manifest.json.\n"
             f"User requirements: {project.get('user_requirements_file') or '(none)'}; {str(project.get('user_notes') or '')[:4000]}\n"
             'Latest feedback: '+str(self._v4_phase(w).get('last_error') or '')[-6000:]+'\n')
+        if mode=='write' and w.get('paper_layout'):
+            from pi.staged_workflow import PAPER_LAYOUT_CONTRACT
+            prefix += PAPER_LAYOUT_CONTRACT + '\n'
         if mode=='plan':
             return prefix+(
                 'Read every requested output and the available input data. Write planning/plan.json: '
@@ -145,6 +148,11 @@ class EfficientWorkflowMixin:
         if self._stopping: return
         project=self._project(); w=project['workflow']; phase=self._v4_phase(w)
         phase['status']='running'; phase.setdefault('attempts',1)
+        if w['mode']=='write' and w.get('paper_layout'):
+            from pi.paper_layout import LAYOUT_SOURCES
+            target=safe_path(self.workspace,'paper/cumcm-layout.tex')
+            target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes(LAYOUT_SOURCES[w['paper_layout']].read_bytes())
         w['snapshot']=hashes(self.workspace,EVIDENCE_DIRS)
         project['status']='running'; self._save_project(project); self.status='running'
         if host:
@@ -187,6 +195,9 @@ class EfficientWorkflowMixin:
                 elif mode in {'scientific_review','document_review'}:
                     await self._v4_review(project)
                 elif mode=='write':
+                    from pi.paper_layout import paper_layout_errors
+                    layout_errors=paper_layout_errors(self.workspace,w.get('paper_layout'))
+                    if layout_errors: raise ValueError('; '.join(layout_errors))
                     accepted={pid for pid,r in w['outcomes'].items() if r['status']=='accepted'}
                     coverage=load_object(self.workspace,'paper/coverage.json')
                     if set(strings(coverage.get('covered_problem_ids'),'covered_problem_ids'))!=accepted:

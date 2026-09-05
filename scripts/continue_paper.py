@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from pi.paper_layout import paper_layout_policy
 from pi.scientific_review import acceptance_chain_errors
 from pi.staged_workflow import frozen_errors, validate_execution_plan, workspace_hashes
 
@@ -75,7 +76,8 @@ def prepare(source: Path, destination: Path) -> dict:
     for field in ("review_snapshot", "last_review", "paper_visual_evidence", "document_review",
                   "verify_repair_count", "spike_elapsed_seconds", "supplemental_spike_ids"):
         current.pop(field, None)
-    current.update(current="paper_planning", mode="run", supplemental_spike=False)
+    current.update(current="paper_planning", mode="run", supplemental_spike=False,
+                   paper_layout=paper_layout_policy(project))
     for phase in current["phases"]:
         if phase["id"] in {"paper_planning", "diagram", "writing", "verify"}:
             phase_id, label = phase["id"], phase["label"]

@@ -92,3 +92,10 @@ CI runs Python 3.11 on Linux and Windows, installs TeX/Poppler and a hash-verifi
 open Chinese font, and performs frontend unit tests, type checking and production
 build. Linux legitimately skips Windows-only Job Object/locking tests; Windows
 must execute them. Runtime and correctness acceptance must be evaluated separately.
+
+## Concurrent paper-layout changes
+
+Synced pi-integration through 3224ee832c4efce61bae1b8a728769cb059e9b14.
+Balanced mode pins the selected CUMCM layout, copies it deterministically before
+writing, and enforces the original source-layout checks before compilation.
+Historical versioned layouts are not silently upgraded.
