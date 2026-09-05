@@ -11,25 +11,97 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-      - name: Apply hash-verified scoped patch
+      - name: Apply reviewed changes and verify exact file hashes
         shell: python
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          import base64,hashlib,json,lzma,os,pathlib,subprocess,urllib.request
-          sha='df44a3a5a266cfe5153fce746e97765487079690'
-          req=urllib.request.Request(f'https://api.github.com/repos/yangzz1125/MathModelAgent/git/blobs/{sha}',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
-          with urllib.request.urlopen(req,timeout=30) as response:
-              data=base64.b64decode(json.load(response)['content'])
-          assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==sha
-          patch=lzma.decompress(data)
-          assert len(patch)==5655
-          assert hashlib.sha256(patch).hexdigest()=='6e696d24a3356549c342140f8a41efde41d911b6640d412ddce1b2286b58d62e'
-          path=pathlib.Path(os.environ['RUNNER_TEMP'])/'native-cleanup.patch';path.write_bytes(patch)
-          subprocess.run(['git','apply','--check',str(path)],check=True)
-          subprocess.run(['git','apply','--index',str(path)],check=True)
-          files=set(subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines())
-          assert files=={'pi/runtime_supervision.py','pi/tests/test_runtime_supervision.py','pi/tests/test_balanced_workflow.py'}
+          from pathlib import Path
+          import hashlib,subprocess
+          p=Path('pi/runtime_supervision.py');s=p.read_text()
+          old='''            if os.name != "nt" and getattr(process, "pid", None):
+                          stop_remaining_process_group(process.pid)
+                      self._cancel_pending_rpc()
+          '''
+          new='''            if os.name != "nt" and getattr(process, "pid", None):
+                          stop_remaining_process_group(process.pid)
+                      # The legacy core returns early when the leader already exited or
+                      # was never assigned. Still fence its Windows job before unlocking.
+                      boundary = getattr(self, "windows_host", None)
+                      if boundary is not None:
+                          if process is not None and process.returncode is None:
+                              raise RuntimeError("Cannot release Host state while the process is active")
+                          boundary.terminate_job(getattr(process, "pid", None))
+                          self._release_host_state()
+                      self._cancel_pending_rpc()
+          '''
+          assert s.count(old)==1
+          p.write_text(s.replace(old,new,1))
+          p=Path('pi/tests/test_runtime_supervision.py');s=p.read_text().replace('from unittest.mock import AsyncMock, patch','from unittest.mock import AsyncMock, Mock, patch')
+          anchor='    async def test_completed_event_reader_that_never_returns_recovers(self):'
+          assert s.count(anchor)==1
+          new='''    async def test_exited_leader_still_fences_job_before_releasing_host_state(self):
+                  runtime = self.runtime
+                  calls = []
+                  boundary = SimpleNamespace(terminate_job=Mock(side_effect=lambda pid: calls.append("fence")))
+                  runtime.windows_host = boundary
+                  def release():
+                      calls.append("release")
+                      runtime.windows_host = None
+                  runtime._release_host_state = Mock(side_effect=release)
+                  await runtime.terminate()
+                  self.assertEqual(calls, ["fence", "release"])
+                  self.assertIsNone(runtime.windows_host)
+          
+              async def test_uncertain_job_cleanup_never_releases_host_state(self):
+                  runtime = self.runtime
+                  boundary = SimpleNamespace(terminate_job=Mock(side_effect=RuntimeError("native job still active")))
+                  runtime.windows_host = boundary
+                  runtime._release_host_state = Mock()
+                  with self.assertRaisesRegex(RuntimeError, "native job still active"):
+                      await runtime.terminate()
+                  runtime._release_host_state.assert_not_called()
+                  self.assertIs(runtime.windows_host, boundary)
+          
+              async def test_live_leader_cannot_be_unlocked_by_a_returned_cleanup(self):
+                  runtime = self.runtime
+                  runtime.process.returncode = None
+                  runtime.windows_host = SimpleNamespace(terminate_job=Mock())
+                  runtime._release_host_state = Mock()
+                  with self.assertRaisesRegex(RuntimeError, "process is active"):
+                      await runtime.terminate()
+                  runtime._release_host_state.assert_not_called()
+          
+          '''
+          p.write_text(s.replace(anchor,new+anchor,1))
+          p=Path('pi/tests/test_balanced_workflow.py');s=p.read_text().replace('import sys\n','import sys\nimport time\n',1).replace("if args[0]=='scripted-pi':","if Path(str(args[0])).name=='scripted-pi':")
+          a=s.index('    async def test_exited_parent_cannot_leave_open_pipe_child(self):');b=s.index('\n\nclass BalancedWorkflowTests',a)
+          new='''    async def test_exited_parent_cannot_leave_open_pipe_child(self):
+                  with tempfile.TemporaryDirectory() as d:
+                      root=Path(d)
+                      code='import subprocess,sys,pathlib;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);pathlib.Path("child.pid").write_text(str(p.pid))'
+                      started=time.monotonic()
+                      result=await run_job([sys.executable,'-c',code],root,seconds=2)
+                      self.assertLess(time.monotonic()-started,8)
+                      pid=int((root/'child.pid').read_text())
+                      if os.name=='nt':
+                          # Windows can close the inherited pipe at leader exit. The
+                          # invariant is an empty Job Object, not a forced timeout flag.
+                          from pi.windows_host import _process_exists
+                          self.assertFalse(_process_exists(pid),'Owned child survived Host cleanup')
+                      else:
+                          self.assertTrue(result.timed_out)
+                          stat=Path(f'/proc/{pid}/stat')
+                          if stat.exists():
+                              self.assertIn(stat.read_text().rsplit(')',1)[1].split()[0],{'Z','X'})
+                          else:
+                              with self.assertRaises(ProcessLookupError): os.kill(pid,0)
+          '''
+          p.write_text(s[:a]+new+s[b:])
+          expected={'pi/runtime_supervision.py':'a5236e0e1e08566ecbfcc0e614ecb4a57e5d22e5','pi/tests/test_runtime_supervision.py':'747a9808348d9b0352052b6f338a82a98f7d4270','pi/tests/test_balanced_workflow.py':'afbec135e351be8fd784f46ee2b8a7f7d4f59d2f'}
+          for name,sha in expected.items():
+              data=Path(name).read_bytes()
+              actual=hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+              assert actual==sha,(name,actual,sha)
+          subprocess.run(['git','add',*expected],check=True)
           subprocess.run(['git','diff','--cached','--check'],check=True)
           subprocess.run(['python','-m','compileall','-q','pi'],check=True)
       - name: Publish without force
