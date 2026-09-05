@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException, UploadFile
 
 import pi.bridge as bridge
+from pi.paper_evidence import paper_visual_errors, render_paper_pages
 from pi.bridge import (
     RPC_STREAM_LIMIT_BYTES,
     TASKS,
@@ -55,6 +56,7 @@ from pi.staged_workflow import (
     expand_problem_phases,
     final_stage_prompt,
     frozen_errors,
+    evidence_downgrade_prompt,
     initial_workflow,
     method_version_dir,
     method_revision_prompt,
@@ -313,6 +315,13 @@ class ScientificContractsTest(unittest.TestCase):
                 "figures/q1/chart.pdf": "hash",
             }}
             self.assertEqual(paper_plan_frozen_errors(normalized, frozen), [])
+            audit_frozen = {"q1": {**frozen["q1"], "reports/q1_SCIENTIFIC_REVIEW.json": "hash"}}
+            normalized["coverage"][0]["result_evidence"] = ["reports/q1_SCIENTIFIC_REVIEW.json"]
+            self.assertIn(
+                "is not eligible scientific evidence",
+                paper_plan_frozen_errors(normalized, audit_frozen, strict=True)[0],
+            )
+            normalized["coverage"][0]["result_evidence"] = ["results/q1/result.json"]
             (workspace / "paper").mkdir()
             section = workspace / "paper" / "q1.tex"
             section.write_text(
@@ -338,6 +347,20 @@ class ScientificContractsTest(unittest.TestCase):
             (workspace / "paper" / "paper_manifest.json").write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ScientificContractError, "limitation overlaps model"):
                 validate_paper_manifest(workspace, normalized)
+
+            manifest["coverage"][0]["anchors"]["limitation"] = "LIMITATION ANCHOR"
+            replacement = workspace / "paper" / "replacement.pdf"
+            replacement.write_bytes(b"%PDF replacement")
+            manifest["coverage"][0]["figures"] = ["paper/replacement.pdf"]
+            section.write_text(section.read_text() + "\\\\includegraphics{replacement.pdf}")
+            (workspace / "paper" / "paper_manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ScientificContractError, "figures differ from frozen plan"):
+                validate_paper_manifest(workspace, normalized, strict=True)
+            manifest["coverage"][0]["figures"] = ["figures/q1/chart.pdf"]
+            (workspace / "paper" / "paper_manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ScientificContractError, "paper replacement"):
+                validate_paper_manifest(workspace, normalized, strict=True)
+
             paper_plan["coverage"] = []
             (workspace / "paper_plan.json").write_text(json.dumps(paper_plan))
             with self.assertRaises(ScientificContractError):
@@ -373,23 +396,6 @@ class ScientificContractsTest(unittest.TestCase):
             body.write_text("Methods \\cite{lp,ip}.\n")
             self.assertEqual(paper_source_errors(workspace), [])
 
-            (paper / "main.pdf").write_bytes(b"%PDF-1.7\n")
-            (paper / "main.log").write_text(
-                "Output written on main.pdf (2 pages).\n", encoding="utf-8"
-            )
-            self.assertIn(
-                "paper_visual: missing or unreadable rendered page: paper/rendered_pages/page-01.png",
-                paper_source_errors(workspace)[0],
-            )
-            from PIL import Image
-
-            rendered = paper / "rendered_pages"
-            rendered.mkdir()
-            for page_number in (1, 2):
-                for suffix in ("", "-gray"):
-                    image = Image.new("L", (800, 1000), 255)
-                    image.putpixel((10, 10), 0)
-                    image.save(rendered / f"page-{page_number:02d}{suffix}.png")
             self.assertEqual(paper_source_errors(workspace), [])
 
             (paper / "main.tex").write_text(
@@ -528,9 +534,9 @@ class StagedWorkflowContractTest(unittest.TestCase):
         writing = final_stage_prompt(
             "writing", competition="MCM", language="English", paper_engine="LaTeX"
         )
-        self.assertIn("render every physical PDF page at at least 160 DPI", writing)
-        self.assertIn("`page-NN.png`", writing)
-        self.assertIn("one color and one grayscale image for every page", writing)
+        self.assertIn("Host will replace `paper/rendered_pages/`", writing)
+        self.assertIn("authoritative color and grayscale renders", writing)
+        self.assertIn("manifest `figures` list", writing)
         paper_plan = paper_planning_prompt(1)
         self.assertIn("may contain only accepted current-problem artifact paths", paper_plan)
         self.assertIn("Never use `reports/PLAN_COMPLETENESS.json`", paper_plan)
@@ -848,7 +854,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 },
             })
             self.assertIn('"probe_scope": ["planned representative-case IDs only"]', spike_text)
-            self.assertIn("never put question IDs in `probe_scope`", spike_text)
+            self.assertIn("never put question IDs in probe_scope", spike_text)
             self.assertIn("`throughput = operations / seconds` within 5%", spike_text)
             supplemental_text = spike_prompt(
                 {
@@ -874,7 +880,8 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertIn("do not copy, carry forward, rename, or invent", supplemental_text)
             self.assertIn("All bash calls and repairs share the one declared budget", spike_text)
             self.assertIn("set `text.usetex=False` after the style", spike_text)
-            self.assertIn("write a structurally complete truthful checkpoint", spike_text)
+            self.assertIn("persist the measurements already obtained", spike_text)
+            self.assertIn("never fabricate answered IDs", spike_text)
             self.assertIn("resolve workspace files from `Path.cwd()`", spike_text)
             self.assertIn("do not infer the root with brittle", spike_text)
             self.assertIn(
@@ -970,7 +977,9 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             repair_text = spike_repair_prompt(
                 card, ["validation_failed: spike report keys mismatch"]
             )
-            self.assertIn("actual_runtime_seconds, answered_question_ids", repair_text)
+            repair_shape = json.loads(repair_text.split("```json\n", 1)[1].split("```", 1)[0])
+            self.assertIn("actual_runtime_seconds", repair_shape)
+            self.assertIsInstance(repair_shape["answered_question_ids"], list)
 
     def test_level_c_cannot_cover_requested_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1727,7 +1736,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             workflow["stage_snapshot"] = workspace_hashes(runtime.workspace)
             workflow["spike_elapsed_seconds"] = 15.2
             runtime._save_project(project)
-            self.assertEqual(runtime._current_runtime_limit(), 5)
+            self.assertAlmostEqual(runtime._current_runtime_limit(), 5, places=0)
             runtime.process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
             runtime.send_rpc = AsyncMock()  # type: ignore[method-assign]
             runtime.terminate = AsyncMock()  # type: ignore[method-assign]
@@ -1777,7 +1786,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime._project()["pause_reason"], "bridge_restart")
             TASKS.clear()
 
-    async def test_v3_incremental_flow_reaches_paper_planning(self) -> None:
+    async def test_v3_mandatory_figure_flow_reaches_host_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = self._workspace(directory)
             workflow = initial_workflow(
@@ -1812,7 +1821,22 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime._project()["workflow"]["current"], "method:q1")
 
             inventory = validate_problem_inventory(workspace, 1)
-            self._write_card(workspace, inventory)
+            raw_card = self._write_card(workspace, inventory)
+            spec = {
+                "id": "q1.figure", "claim_ids": ["q1.objective"],
+                "purpose": "Show the feasible vertex objectives.",
+                "plot_family": "sensitivity-line", "reference_id": "trend-01-sensitivity",
+                "panels": ["objective"], "primary_encoding": "position",
+                "secondary_encoding": "marker", "required_annotations": ["vertices"],
+                "final_width": "full", "vector_path": "figures/q1/value.pdf",
+                "preview_path": "figures/q1/value.png", "generator_path": "code/q1/plot.py",
+                "data_paths": ["results/q1/vertices.csv"], "required_data_fields": ["x", "objective"],
+            }
+            raw_card["problem"]["figure_specs"] = [spec]
+            raw_card["problem"]["outputs"].extend([
+                spec["vector_path"], spec["preview_path"], spec["generator_path"], *spec["data_paths"],
+            ])
+            self._write(method_version_dir(workspace, "q1", 1) / "method_card.json", raw_card)
             await runtime._settled()
             self.assertEqual(runtime._project()["workflow"]["current"], "spike:q1")
 
@@ -1838,6 +1862,31 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 "status": "candidate",
                 "metrics": [{"name": "objective", "value": 1, "unit": "", "description": "test"}],
             })
+            import subprocess
+            import shutil
+            from pi.figure_quality import DEFAULT_STYLE_STACK, REQUIRED_CHECKS
+
+            (workspace / "figures/q1").mkdir()
+            (workspace / "results/q1/vertices.csv").write_text("x,objective\n0,0\n1,1\n")
+            (workspace / "code/q1/plot.py").write_text(
+                "import csv\nimport matplotlib\nmatplotlib.use('Agg')\n"
+                "import matplotlib.pyplot as plt\nimport scienceplots\n"
+                "rows=list(csv.DictReader(open('results/q1/vertices.csv')))\n"
+                "plt.style.use(['science','no-latex'])\n"
+                "fig,ax=plt.subplots(figsize=(6,4))\n"
+                "ax.plot([float(r['x']) for r in rows],[float(r['objective']) for r in rows],marker='o')\n"
+                "ax.set(xlabel='Vertex',ylabel='Objective')\n"
+                "fig.savefig('figures/q1/value.pdf',bbox_inches='tight')\n"
+                "fig.savefig('figures/q1/value.png',dpi=200,bbox_inches='tight')\n"
+            )
+            subprocess.run([sys.executable, "code/q1/plot.py"], cwd=workspace, check=True, timeout=30)
+            provenance = {key: spec[key] for key in (
+                "preview_path", "reference_id", "claim_ids", "purpose", "plot_family",
+                "generator_path", "data_paths", "required_data_fields",
+            )}
+            provenance.update(path=spec["vector_path"], spec_id=spec["id"],
+                              style_stack=list(DEFAULT_STYLE_STACK), language="English",
+                              checks=sorted(REQUIRED_CHECKS))
             self._write(workspace / "results" / "q1" / "verification.json", {
                 "schema_version": 2,
                 "status": "candidate",
@@ -1845,7 +1894,7 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 "estimated_runtime_seconds": 0.1,
                 "actual_runtime_seconds": 0.1,
                 "checks": ["all vertices"],
-                "figures": [],
+                "figures": [provenance],
                 "claim_evidence": [{
                     "claim_id": "q1.objective",
                     "status": "supported",
@@ -1907,11 +1956,143 @@ class IncrementalPlanningV3Test(unittest.IsolatedAsyncioTestCase):
                 for path in runtime._ledger()["problems"]["q1"]["spike"]["artifact_sha256"]
                 if path.endswith("witness.json")
             )
-            (workspace / spike_artifact).write_text("tampered", encoding="utf-8")
+            spike_path = workspace / spike_artifact
+            original_spike = spike_path.read_bytes()
+            spike_path.write_text("tampered", encoding="utf-8")
             _, spike_tamper_errors = plan_completeness_receipt(
                 workspace, validate_execution_plan(workspace), runtime._ledger()
             )
             self.assertTrue(any("spike artifact hash mismatch" in error for error in spike_tamper_errors))
+            spike_path.write_bytes(original_spike)
+
+            self._write(workspace / "paper_plan.json", {
+                "schema_version": 1, "plan_version": 1, "recommended_page_range": [1, 2],
+                "coverage": [{
+                    "claim_id": "q1.objective", "problem_id": "q1", "section_id": "q1",
+                    "interpretation_and_assumptions": "Use the accepted finite model.",
+                    "model_or_equations": ["Maximize the accepted objective."],
+                    "algorithm_and_stopping": "Enumerate every finite candidate.",
+                    "result_evidence": ["results/q1/result.json"],
+                    "validation_evidence": ["results/q1/evidence.json"],
+                    "sensitivity_or_robustness": "Limited to the stated polygon.",
+                    "approximation_ids": [], "limitations": ["Stated polygon only."],
+                    "figures": [spec["vector_path"]], "citations_needed": [],
+                }],
+            })
+            (workspace / "reports/PAPER_PLAN.md").write_text("# Paper plan\n")
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "diagram")
+            (workspace / "reports/DRAWIO_REPORT.md").write_text("No conceptual diagram needed.\n")
+            await runtime._settled()
+            self.assertEqual(runtime._project()["workflow"]["current"], "writing")
+
+            paper = workspace / "paper"
+            section = paper / "q1.tex"
+            section.write_text(
+                "MODEL ANCHOR ALGORITHM ANCHOR RESULT ANCHOR VALIDATION ANCHOR "
+                "CONCLUSION ANCHOR LIMITATION ANCHOR\n"
+                "\\includegraphics[width=12cm]{../figures/q1/value.pdf}\n"
+            )
+            self._write(paper / "paper_manifest.json", {
+                "schema_version": 1, "plan_version": 1, "coverage": [{
+                    "claim_id": "q1.objective", "section_file": "paper/q1.tex",
+                    "anchors": {
+                        "model": "MODEL ANCHOR", "algorithm": "ALGORITHM ANCHOR",
+                        "result": "RESULT ANCHOR", "validation": "VALIDATION ANCHOR",
+                        "conclusion": "CONCLUSION ANCHOR", "limitation": "LIMITATION ANCHOR",
+                    },
+                    "figures": [spec["vector_path"]],
+                }],
+            })
+            (paper / "main.tex").write_text(
+                "\\documentclass[a4paper]{article}\n\\usepackage{graphicx}\n"
+                "\\begin{document}\n\\input{q1}\n\\newpage\n"
+                "Independent validation and limitations.\n\\end{document}\n"
+            )
+            for _ in range(2):
+                subprocess.run([shutil.which("xelatex"), "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                               cwd=paper, check=True, timeout=60, stdout=subprocess.DEVNULL)
+
+            await runtime._settled()
+            saved = runtime._project()
+            self.assertEqual(saved["workflow"]["current"], "verify")
+            self.assertEqual(saved["workflow"]["paper_visual_evidence"]["page_count"], 2)
+            self.assertEqual(paper_visual_errors(workspace, saved["workflow"]["paper_visual_evidence"]), [])
+            runtime._last_assistant_text = json.dumps({
+                "schema_version": 1, "review_type": "document", "problem_id": None,
+                "verdict": "accept", "claim_coverage": "pass", "manifest_anchors": "pass",
+                "evidence_consistency": "pass", "references_and_figures": "pass",
+                "compilation": "pass", "visual_readability": "pass",
+                "document_structure": "pass", "issue_class": "none",
+                "summary": "The complete physical paper is consistent.",
+                "issues": [], "required_repairs": [], "warnings": [],
+            })
+            await runtime._settled()
+            self.assertEqual(runtime.status, "completed")
+            self.assertEqual(runtime._project()["status"], "completed")
+            self.assertEqual(frozen_errors(workspace, runtime._project()["workflow"]["frozen"]), [])
+
+    def test_host_renders_and_hashes_every_physical_pdf_page(self) -> None:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            paper = workspace / "paper"
+            paper.mkdir()
+            pdf = paper / "main.pdf"
+            with PdfPages(pdf) as pages:
+                for number in (1, 2):
+                    figure, axis = plt.subplots(figsize=(8, 10))
+                    axis.plot([0, 1], [number, number + 1])
+                    axis.set_title(f"Page {number}")
+                    pages.savefig(figure)
+                    plt.close(figure)
+            record = render_paper_pages(workspace, pdf)
+            self.assertEqual(record["page_count"], 2)
+            self.assertEqual(paper_visual_errors(workspace, record), [])
+            self.assertTrue(paper_visual_errors(workspace, None))
+            with self.assertRaisesRegex(ValueError, "cancelled"):
+                render_paper_pages(workspace, pdf, cancelled=lambda: True)
+            self.assertTrue((paper / "rendered_pages/page-02-gray.png").is_file())
+            (paper / "rendered_pages/page-01.png").write_bytes(b"tampered")
+            self.assertEqual(
+                paper_visual_errors(workspace, record),
+                ["artifact_changed: PDF/page evidence changed: paper/rendered_pages/page-01.png"],
+            )
+
+    def test_paper_plan_reports_all_list_type_errors_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            workspace.joinpath("paper_plan.json").write_text(json.dumps({
+                "schema_version": 1, "plan_version": 1,
+                "recommended_page_range": [8, 10],
+                "coverage": [{
+                    "claim_id": "q1.objective", "problem_id": "q1", "section_id": "q1",
+                    "interpretation_and_assumptions": "assumptions",
+                    "model_or_equations": "equation", "algorithm_and_stopping": "stop",
+                    "result_evidence": ["result"], "validation_evidence": ["validation"],
+                    "sensitivity_or_robustness": "sensitivity", "approximation_ids": [],
+                    "limitations": "limitation", "figures": [], "citations_needed": [],
+                }],
+            }))
+            plan = {"plan_version": 1, "problems": [{"id": "q1", "claims": [{"id": "q1.objective"}], "approximations": []}]}
+            with self.assertRaises(ScientificContractError) as raised:
+                validate_paper_plan(workspace, plan)
+            self.assertIn("model_or_equations must be a non-empty list", str(raised.exception))
+            self.assertIn("limitations must be a non-empty list", str(raised.exception))
+
+    def test_dedicated_downgrade_and_supplemental_prompts_are_unambiguous(self) -> None:
+        inventory = IncrementalPlanningV3Test()._inventory()
+        review = {"allowed_downgrades": [{"claim_id": "q1.objective", "from": "A_certified", "to": "B_bounded_numerical", "reason": "bounded domain"}]}
+        downgrade = evidence_downgrade_prompt(inventory, "q1", 2, review)
+        self.assertIn("final revision is downgrade-only", downgrade)
+        self.assertNotIn("Do not strengthen or downgrade evidence here", downgrade)
+        card = IncrementalPlanningV3Test()._card(inventory)
+        card["method_spec_sha256"] = "a" * 64
+        supplemental = spike_prompt(card, supplemental=True, supplemental_ids=["q1.spike.question"])
+        self.assertIn('"probe_scope": []', supplemental)
+        self.assertNotIn("equals the Method Card question-ID set exactly", supplemental)
 
 
 class BridgeHelpersTest(unittest.TestCase):
@@ -1998,7 +2179,7 @@ class BridgeHelpersTest(unittest.TestCase):
         self.assertFalse(_verification_passed("One check did not PASS.\n"))
 
     def test_document_stack_checks_selected_engine_and_pdf_renderer(self) -> None:
-        available = {"xelatex": "xelatex.exe", "pdftoppm": "pdftoppm.exe"}
+        available = {"xelatex": "xelatex.exe", "pdftoppm": "pdftoppm.exe", "pdfinfo": "pdfinfo.exe"}
         with patch.object(bridge.shutil, "which", side_effect=available.get):
             self.assertEqual(_document_stack_errors("LaTeX"), [])
             self.assertEqual(
@@ -2545,6 +2726,86 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((runtime.workspace / "execution_plan.revision.json").exists())
             runtime._switch_session.assert_awaited_once_with("worker")
 
+    async def test_v3_integrity_errors_are_terminal_across_repairs(self) -> None:
+        for repair in ("_repair_candidate_v2", "_repair_current", "_start_writing_repair", "_repair_paper_plan"):
+            with self.subTest(repair=repair), tempfile.TemporaryDirectory() as directory:
+                runtime = self._workspace(directory, at_problem=True)
+                project = runtime._project()
+                project["workflow"]["contract_version"] = 3
+                runtime._save_project(project)
+                runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+                runtime.system = AsyncMock()  # type: ignore[method-assign]
+                runtime.terminate = AsyncMock()  # type: ignore[method-assign]
+                errors = ["artifact_changed: stage wrote outside its boundary: input/problem.md"]
+                if repair == "_repair_paper_plan":
+                    await runtime._repair_paper_plan(project, errors)
+                else:
+                    await getattr(runtime, repair)(errors)
+                self.assertEqual(runtime.status, "failed")
+                self.assertEqual(runtime._project()["workflow"]["mode"], "failed")
+                runtime.prompt.assert_not_awaited()
+                runtime.terminate.assert_awaited_once()
+
+    async def test_pause_cancels_host_render_without_advancing_or_failing(self) -> None:
+        import threading
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self._workspace(directory, at_problem=True)
+            project = runtime._project()
+            project["workflow"].update(contract_version=3, current="writing", mode="run")
+            runtime._save_project(project)
+            runtime.prompt = AsyncMock()
+            runtime.system = AsyncMock()
+            runtime._gate_current = lambda _: ([], None)
+            started = threading.Event()
+
+            def render(_workspace, _pdf, *, cancelled):
+                started.set()
+                while not cancelled():
+                    time.sleep(0.01)
+                raise ValueError("Host rendering cancelled")
+
+            with patch.object(bridge, "render_paper_pages", side_effect=render):
+                settled = asyncio.create_task(runtime._settled())
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                    await runtime.pause()
+                    await asyncio.wait_for(settled, 5)
+                finally:
+                    await runtime.terminate()
+                    await settled
+            self.assertEqual(runtime.status, "paused")
+            self.assertEqual(runtime._project()["workflow"]["current"], "writing")
+            runtime.prompt.assert_not_awaited()
+
+    async def test_exhausted_spike_budget_does_not_start_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = IncrementalPlanningV3Test()._workspace(directory)
+            inventory = IncrementalPlanningV3Test()._inventory()
+            card = IncrementalPlanningV3Test()._write_card(workspace, inventory)
+            workflow = initial_workflow(
+                {"model": "planner", "thinking": "high"},
+                {"model": "worker", "thinking": "high"}, contract_version=3,
+            )
+            workflow["phases"].append({
+                "id": "spike:q1", "label": "Spike", "status": "running", "attempts": 1,
+            })
+            workflow.update(current="spike:q1", mode="feasibility_spike", spike_elapsed_seconds=20)
+            (workspace / "project.json").write_text(json.dumps({
+                "status": "running", "problem_file": "input/problem.md", "workflow": workflow,
+            }))
+            runtime = TaskRuntime("b" * 12, workspace, status="running")
+            runtime.prompt = AsyncMock()  # type: ignore[method-assign]
+            runtime.system = AsyncMock()  # type: ignore[method-assign]
+            runtime.terminate = AsyncMock()  # type: ignore[method-assign]
+            runtime._method_card = lambda _: card  # type: ignore[method-assign]
+
+            await runtime._retry_spike_v3(runtime._project(), ["performance_budget: timeout"])
+
+            self.assertEqual(runtime.status, "failed")
+            runtime.prompt.assert_not_awaited()
+
     async def test_complete_v2_workflow_reaches_document_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = self._workspace(directory)
@@ -2807,6 +3068,9 @@ class ScientificRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(phase["attempts"], 1)
             self.assertEqual(phase["candidate_repair_attempts"], 2)
             self.assertEqual(runtime.prompt.await_count, 2)
+            with patch.object(bridge, "_runtime", return_value=runtime):
+                status = await bridge.task_status(runtime.task_id, SimpleNamespace(base_url="http://127.0.0.1/"))
+            self.assertEqual(status["phases"][2]["candidate_repair_attempts"], 2)
 
             await runtime._repair_candidate_v2(error)
             self.assertEqual(runtime.status, "failed")

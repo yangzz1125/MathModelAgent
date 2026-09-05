@@ -59,6 +59,17 @@ FAILURE_CATEGORIES = {
     "decision_outcome",
 }
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+PAPER_COVERAGE_EXAMPLE = {
+    "claim_id": "exact_claim_id", "problem_id": "q1", "section_id": "q1",
+    "interpretation_and_assumptions": "Interpretation and assumptions.",
+    "model_or_equations": ["Objective and equations."],
+    "algorithm_and_stopping": "Algorithm and stopping rule.",
+    "result_evidence": ["results/q1/result.json"],
+    "validation_evidence": ["results/q1/evidence.json"],
+    "sensitivity_or_robustness": "Sensitivity or justified applicability boundary.",
+    "approximation_ids": [], "limitations": ["Explicit applicability limitation."],
+    "figures": [], "citations_needed": [],
+}
 
 
 class ScientificContractError(ValueError):
@@ -927,8 +938,19 @@ def acceptance_chain_errors(
     return errors
 
 
+def paper_evidence_paths(frozen: dict[str, Any]) -> dict[str, list[str]]:
+    return {
+        problem_id: sorted(
+            path for path in paths
+            if path.startswith((f"results/{problem_id}/", f"figures/{problem_id}/", f"code/{problem_id}/"))
+            or path == f"reports/{problem_id}_RESULTS.md"
+        )
+        for problem_id, paths in frozen.items() if isinstance(paths, dict)
+    }
+
+
 def paper_plan_frozen_errors(
-    paper_plan: dict[str, Any], frozen: dict[str, Any]
+    paper_plan: dict[str, Any], frozen: dict[str, Any], *, strict: bool = False
 ) -> list[str]:
     frozen_paths = {
         path
@@ -942,13 +964,24 @@ def paper_plan_frozen_errors(
         for field in ("result_evidence", "validation_evidence", "figures")
         for path in entry[field]
     }
-    return [
+    errors = [
         f"paper_coverage: evidence is not frozen: {path}"
         for path in sorted(referenced - frozen_paths)
     ]
+    if strict:
+        eligible = paper_evidence_paths(frozen)
+        for entry in paper_plan["coverage"]:
+            allowed = set(eligible.get(entry["problem_id"], []))
+            for field in ("result_evidence", "validation_evidence", "figures"):
+                for path in entry[field]:
+                    if path not in allowed:
+                        errors.append(f"paper_coverage: {entry['claim_id']}.{field} is not eligible scientific evidence: {path}")
+    return errors
 
 
-def validate_paper_plan(workspace: Path, plan: dict[str, Any]) -> dict[str, Any]:
+def validate_paper_plan(
+    workspace: Path, plan: dict[str, Any], *, strict: bool = False
+) -> dict[str, Any]:
     try:
         raw = json.loads((workspace / "paper_plan.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError) as exc:
@@ -978,6 +1011,22 @@ def validate_paper_plan(workspace: Path, plan: dict[str, Any]) -> dict[str, Any]
     coverage = _list(item.get("coverage"), "paper_plan.coverage")
     seen: set[str] = set()
     normalized = []
+    format_errors: list[str] = []
+    for index, raw_entry in enumerate(coverage):
+        if not isinstance(raw_entry, dict):
+            format_errors.append(f"paper_plan.coverage[{index}] must be an object")
+            continue
+        label = raw_entry.get("claim_id") or f"coverage[{index}]"
+        for field, example in PAPER_COVERAGE_EXAMPLE.items():
+            try:
+                if isinstance(example, list):
+                    _text_list(raw_entry.get(field), f"{label}.{field}", empty=not example)
+                else:
+                    _text(raw_entry.get(field), f"{label}.{field}")
+            except ScientificContractError as exc:
+                format_errors.append(str(exc))
+    if format_errors:
+        raise ScientificContractError("; ".join(format_errors))
     for index, raw_entry in enumerate(coverage):
         entry = _object(raw_entry, f"paper_plan.coverage[{index}]")
         claim_id = _text(entry.get("claim_id"), f"coverage[{index}].claim_id")
@@ -1006,6 +1055,15 @@ def validate_paper_plan(workspace: Path, plan: dict[str, Any]) -> dict[str, Any]
         for figure in figures:
             if not (workspace / figure).is_file():
                 raise ScientificContractError(f"paper plan figure missing: {figure}")
+        if strict:
+            expected_figures = {
+                spec["vector_path"] for problem in plan["problems"]
+                for spec in problem.get("figure_specs", []) if claim_id in spec["claim_ids"]
+            }
+            if set(figures) != expected_figures:
+                raise ScientificContractError(
+                    f"paper plan figures for {claim_id} must equal accepted vector masters: {sorted(expected_figures)}"
+                )
         seen.add(claim_id)
         normalized.append({
             "claim_id": claim_id,
@@ -1036,7 +1094,7 @@ def validate_paper_plan(workspace: Path, plan: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def paper_source_errors(workspace: Path) -> list[str]:
+def paper_source_errors(workspace: Path, *, legacy_visual: bool = True) -> list[str]:
     """Check explicit LaTeX references and obvious page-padding constructs."""
     paper = workspace / "paper"
     sources = sorted(paper.rglob("*.tex")) if paper.is_dir() else []
@@ -1086,39 +1144,90 @@ def paper_source_errors(workspace: Path) -> list[str]:
     ):
         errors.append("paper_layout: consecutive forced page breaks")
 
-    log_path = paper / "main.log"
-    pdf_path = paper / "main.pdf"
-    if pdf_path.is_file() and log_path.is_file():
-        log_text = log_path.read_text(encoding="utf-8", errors="replace")
-        match = re.search(r"Output written on .*?\((\d+) pages?\)", log_text)
+    if legacy_visual and (paper / "main.pdf").is_file() and (paper / "main.log").is_file():
+        log_text = (paper / "main.log").read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"Output written on .*?\((\d+) pages?(?:,\s*\d+ bytes)?\)", log_text)
         if not match:
             errors.append("paper_visual: main.log does not report the compiled page count")
         else:
-            page_count = int(match.group(1))
-            rendered = paper / "rendered_pages"
-            for page_number in range(1, page_count + 1):
-                for suffix in ("", "-gray"):
-                    relative = f"paper/rendered_pages/page-{page_number:02d}{suffix}.png"
-                    image_path = rendered / f"page-{page_number:02d}{suffix}.png"
-                    try:
-                        from PIL import Image
+            from PIL import Image
 
-                        with Image.open(image_path) as image:
+            for number in range(1, int(match.group(1)) + 1):
+                for suffix in ("", "-gray"):
+                    relative = f"paper/rendered_pages/page-{number:02d}{suffix}.png"
+                    try:
+                        with Image.open(workspace / relative) as image:
                             image.load()
-                            width, height = image.size
-                            extrema = image.convert("L").getextrema()
-                        if min(width, height) < 800:
-                            errors.append(
-                                f"paper_visual: rendered page is below readable resolution: {relative} ({width}x{height})"
-                            )
+                            size, extrema = image.size, image.convert("L").getextrema()
+                        if min(size) < 800:
+                            errors.append(f"paper_visual: rendered page is below readable resolution: {relative} ({size[0]}x{size[1]})")
                         if extrema[0] == extrema[1]:
                             errors.append(f"paper_visual: rendered page is blank: {relative}")
                     except (FileNotFoundError, OSError, ValueError) as exc:
                         errors.append(f"paper_visual: missing or unreadable rendered page: {relative}: {exc}")
+
     return errors
 
 
-def validate_paper_manifest(workspace: Path, paper_plan: dict[str, Any]) -> dict[str, Any]:
+def _paper_figure_errors(workspace: Path, paper_plan: dict[str, Any], sections: list[str]) -> list[str]:
+    paper = workspace / "paper"
+    master = paper / ("main.tex" if (paper / "main.tex").is_file() else "main.typ")
+    pending = [master] if master.is_file() else [workspace / section for section in sections]
+    sources: dict[Path, str] = {}
+    errors: list[str] = []
+    while pending:
+        path = pending.pop().resolve()
+        if path in sources:
+            continue
+        try:
+            path.relative_to(paper.resolve())
+            text = path.read_text(encoding="utf-8")
+            text = re.sub(r"(?m)(?<!\\)%.*$", "", text) if path.suffix == ".tex" else re.sub(r"(?m)//.*$", "", text)
+            sources[path] = text
+            includes = re.findall(r"\\(?:input|include)\s*\{([^{}]+)\}", text)
+            includes += re.findall(r'#(?:include|import)\s+"([^"]+)"', text)
+            for name in includes:
+                candidates = [paper / name, path.parent / name]
+                if not Path(name).suffix:
+                    candidates = [candidate.with_suffix(path.suffix) for candidate in candidates]
+                child = next((candidate for candidate in candidates if candidate.is_file()), None)
+                if child is None:
+                    raise ValueError(f"unresolved literal paper source: {name}")
+                pending.append(child)
+        except (OSError, ValueError) as exc:
+            errors.append(f"paper_figures: {exc}")
+    search_roots = [paper]
+    for text in sources.values():
+        for group in re.findall(r"\\graphicspath\s*\{((?:\s*\{[^{}]+\})+\s*)\}", text):
+            search_roots.extend(paper / name for name in re.findall(r"\{([^{}]+)\}", group))
+    planned = {(workspace / figure).resolve() for row in paper_plan["coverage"] for figure in row["figures"]}
+    problem_roots = [(workspace / "figures" / row["problem_id"]).resolve() for row in paper_plan["coverage"]]
+    used: set[Path] = set()
+    for path, text in sources.items():
+        names = re.findall(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", text)
+        names += re.findall(r'\bimage\(\s*"([^"]+)"', text)
+        for name in names:
+            candidates = [root / name for root in [*search_roots, path.parent]]
+            if not Path(name).suffix:
+                candidates = [candidate.with_suffix(ext) for candidate in candidates for ext in (".pdf", ".png", ".jpg", ".jpeg")]
+            figure = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+            if figure is None:
+                errors.append(f"paper_figures: unresolved literal figure: {name}")
+                continue
+            used.add(figure)
+            if figure not in planned and (
+                not figure.is_relative_to((workspace / "figures").resolve())
+                or any(figure.is_relative_to(root) for root in problem_roots)
+            ):
+                errors.append(f"paper_figures: unplanned scientific figure or paper replacement: {name}")
+    for figure in sorted(planned - used):
+        errors.append(f"paper_figures: planned frozen figure is not included: {figure.relative_to(workspace.resolve()).as_posix()}")
+    return errors
+
+
+def validate_paper_manifest(
+    workspace: Path, paper_plan: dict[str, Any], *, strict: bool = False
+) -> dict[str, Any]:
     path = workspace / "paper" / "paper_manifest.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -1165,11 +1274,20 @@ def validate_paper_manifest(workspace: Path, paper_plan: dict[str, Any]) -> dict
                 raise ScientificContractError(
                     f"paper manifest limitation overlaps {name} anchor: {claim_id}"
                 )
-        for figure in _text_list(entry.get("figures"), f"{claim_id}.figures", empty=True):
+        figures = _text_list(entry.get("figures"), f"{claim_id}.figures", empty=True)
+        if strict:
+            planned = next(row["figures"] for row in paper_plan["coverage"] if row["claim_id"] == claim_id)
+            if set(figures) != set(planned):
+                raise ScientificContractError(f"paper manifest scientific figures differ from frozen plan: {claim_id}")
+        for figure in figures:
             figure_path = _relative(figure, f"{claim_id}.figure")
             if not (workspace / figure_path).is_file():
                 raise ScientificContractError(f"paper manifest figure missing: {figure_path}")
         seen.add(claim_id)
     if seen != expected:
         raise ScientificContractError(f"paper manifest missing claims: {sorted(expected - seen)}")
+    if strict:
+        errors = _paper_figure_errors(workspace, paper_plan, [row["section_file"] for row in item["coverage"]])
+        if errors:
+            raise ScientificContractError("; ".join(errors))
     return item

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 import zipfile
@@ -28,12 +29,14 @@ from pydantic import BaseModel
 from starlette.websockets import WebSocketDisconnect
 
 from pi.figure_quality import figure_stack_errors
+from pi.paper_evidence import paper_visual_errors, render_paper_pages
 from pi.scientific_review import (
     ScientificContractError,
     acceptance_chain_errors,
     document_review_markdown,
     merge_plan_revision,
     paper_plan_frozen_errors,
+    paper_evidence_paths,
     paper_source_errors,
     parse_document_review,
     parse_method_review,
@@ -417,6 +420,8 @@ def _document_stack_errors(paper_engine: str) -> list[str]:
         errors.append(f"document_preflight: missing {command} for {paper_engine}")
     if not shutil.which("pdftoppm"):
         errors.append("document_preflight: missing pdftoppm for visual verification")
+    if not shutil.which("pdfinfo"):
+        errors.append("document_preflight: missing pdfinfo for physical page count")
     return errors
 
 
@@ -784,6 +789,7 @@ class TaskRuntime:
         default_factory=dict
     )
     _transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _host_render_cancel: threading.Event | None = None
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _budget_exceeded: bool = False
     _tool_policy_token: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -894,6 +900,8 @@ class TaskRuntime:
 
     async def terminate(self) -> None:
         """Terminate the RPC wrapper and its Pi/Node descendants."""
+        if self._host_render_cancel is not None:
+            self._host_render_cancel.set()
         for watchdog in self._tool_watchdogs.values():
             watchdog.cancel()
         self._tool_watchdogs.clear()
@@ -1118,7 +1126,7 @@ class TaskRuntime:
         if mode == "feasibility_spike":
             card = self._method_card(workflow)
             if card:
-                if int(phase.get("local_repair_attempts") or 0):
+                if workflow.get("spike_repair_active", bool(phase.get("local_repair_attempts"))):
                     return spike_repair_prompt(
                         card,
                         errors,
@@ -1179,7 +1187,11 @@ class TaskRuntime:
                 ids[ids.index(problem["id"]):],
             )
         if mode == "paper_plan_repair":
-            return paper_plan_repair_prompt(errors)
+            return paper_plan_repair_prompt(
+                errors, plan_version=int(workflow.get("plan_version") or 1),
+                evidence_paths=self._paper_context_paths(project, writing=False),
+                eligible_evidence=paper_evidence_paths(workflow.get("frozen") or {}),
+            )
         if mode == "paper_manifest_repair":
             return paper_manifest_repair_prompt(errors)
         if mode == "verify_repair":
@@ -1365,7 +1377,7 @@ class TaskRuntime:
                 log.write(chunk)
                 log.flush()
 
-    async def _watch_tool(self, tool_call_id: str, seconds: int) -> None:
+    async def _watch_tool(self, tool_call_id: str, seconds: float) -> None:
         try:
             await asyncio.sleep(seconds)
             if tool_call_id not in self._tool_watchdogs:
@@ -1464,6 +1476,9 @@ class TaskRuntime:
             )
             if str(event.get("toolName") or "") == "bash":
                 seconds = self._current_runtime_limit()
+                if seconds == 0:
+                    await self._wait_with_errors(["performance_budget: Spike compute budget exhausted"])
+                    return
                 if seconds:
                     self._tool_started_at[tool_call_id] = time.monotonic()
                     self._tool_watchdogs[tool_call_id] = asyncio.create_task(
@@ -1823,7 +1838,7 @@ class TaskRuntime:
             if path and (self.workspace / path).is_file()
         )
 
-    def _current_runtime_limit(self) -> int | None:
+    def _current_runtime_limit(self) -> float | None:
         try:
             workflow = self._project().get("workflow") or {}
             if workflow.get("contract_version") == 3 and str(workflow.get("current") or "").startswith("spike:"):
@@ -1832,10 +1847,11 @@ class TaskRuntime:
                     budget = 60 if workflow.get("supplemental_spike") else spike_budget(
                         card["problem"]["runtime_limit_seconds"]
                     )
-                    remaining = budget - int(float(workflow.get("spike_elapsed_seconds") or 0))
+                    remaining = budget - float(workflow.get("spike_elapsed_seconds") or 0)
+                    remaining -= sum(max(0.0, time.monotonic() - start) for start in self._tool_started_at.values())
                     if remaining <= 0:
                         self._budget_exceeded = True
-                    return max(1, remaining)
+                    return max(0.0, remaining)
             problem = self._problem(workflow)
             return int(problem["runtime_limit_seconds"]) if problem else None
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -1908,6 +1924,7 @@ class TaskRuntime:
             return paper_planning_prompt(
                 int(plan.get("plan_version") or 1),
                 self._paper_context_paths(project, writing=False),
+                paper_evidence_paths(workflow.get("frozen") or {}),
             )
         problem = self._problem(workflow)
         if problem:
@@ -2036,6 +2053,9 @@ class TaskRuntime:
             if not card:
                 errors.append("validation_failed: current method card is invalid")
             else:
+                budget = 60 if workflow.get("supplemental_spike") else spike_budget(card["problem"]["runtime_limit_seconds"])
+                if float(workflow.get("spike_elapsed_seconds") or 0) > budget:
+                    errors.append("performance_budget: Host-measured Spike time exceeded budget")
                 try:
                     plan = self._spike_report(workflow, card)
                 except ContractError as exc:
@@ -2057,10 +2077,13 @@ class TaskRuntime:
         elif stage == "paper_planning":
             try:
                 active_plan = validate_execution_plan(self.workspace)
-                normalized_paper_plan = validate_paper_plan(self.workspace, active_plan)
+                normalized_paper_plan = validate_paper_plan(
+                    self.workspace, active_plan, strict=workflow.get("contract_version") == 3,
+                )
                 errors.extend(
                     paper_plan_frozen_errors(
-                        normalized_paper_plan, workflow.get("frozen") or {}
+                        normalized_paper_plan, workflow.get("frozen") or {},
+                        strict=workflow.get("contract_version") == 3,
                     )
                 )
             except (ContractError, ScientificContractError) as exc:
@@ -2075,17 +2098,25 @@ class TaskRuntime:
             if workflow.get("contract_version") in {2, 3}:
                 try:
                     active_plan = validate_execution_plan(self.workspace)
-                    paper_plan = validate_paper_plan(self.workspace, active_plan)
+                    paper_plan = validate_paper_plan(
+                        self.workspace, active_plan, strict=workflow.get("contract_version") == 3,
+                    )
                     errors.extend(
                         paper_plan_frozen_errors(
-                            paper_plan, workflow.get("frozen") or {}
+                            paper_plan, workflow.get("frozen") or {},
+                            strict=workflow.get("contract_version") == 3,
                         )
                     )
-                    validate_paper_manifest(self.workspace, paper_plan)
-                    errors.extend(paper_source_errors(self.workspace))
+                    validate_paper_manifest(self.workspace, paper_plan, strict=workflow.get("contract_version") == 3)
+                    errors.extend(paper_source_errors(
+                        self.workspace,
+                        legacy_visual=workflow.get("contract_version") == 2,
+                    ))
                 except (ContractError, ScientificContractError) as exc:
                     errors.append(f"validation_failed: {exc}")
         elif stage == "verify":
+            if workflow.get("contract_version") == 3:
+                errors.extend(paper_visual_errors(self.workspace, workflow.get("paper_visual_evidence")))
             if workflow.get("contract_version") in {2, 3}:
                 try:
                     active_plan = validate_execution_plan(self.workspace)
@@ -2106,6 +2137,14 @@ class TaskRuntime:
             if not _paper_readable(self.workspace):
                 errors.append("validation_failed: paper PDF is missing, empty, or unreadable")
         return errors, plan
+
+    async def _reject_integrity_errors(self, errors: list[str]) -> bool:
+        if self._project()["workflow"].get("contract_version") == 3 and any(
+            error.startswith(("artifact_changed:", "scientific_acceptance:")) for error in errors
+        ):
+            await self._wait_with_errors(errors)
+            return True
+        return False
 
     async def _wait_with_errors(self, errors: list[str]) -> None:
         project = self._project()
@@ -2224,6 +2263,8 @@ class TaskRuntime:
         await self._start_writing_repair(errors)
 
     async def _start_writing_repair(self, errors: list[str]) -> None:
+        if await self._reject_integrity_errors(errors):
+            return
         project = self._project()
         workflow = project["workflow"]
         repairs_done = int(workflow.get("verify_repair_count") or 0)
@@ -2261,6 +2302,8 @@ class TaskRuntime:
             await self._wait_with_errors([f"rpc_error: writing repair failed: {exc}"])
 
     async def _repair_current(self, errors: list[str]) -> None:
+        if await self._reject_integrity_errors(errors):
+            return
         project = self._project()
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
@@ -2347,6 +2390,7 @@ class TaskRuntime:
         if workflow.get("contract_version") == 3:
             if next_phase and next_phase["id"].startswith("spike:"):
                 workflow["spike_elapsed_seconds"] = 0.0
+                workflow["spike_repair_active"] = False
             elif stage.startswith("spike:"):
                 workflow.pop("spike_elapsed_seconds", None)
         workflow["stage_snapshot"] = workspace_hashes(self.workspace)
@@ -2644,6 +2688,8 @@ class TaskRuntime:
             await self._start_method_replan(project, problem, review)
 
     async def _repair_candidate_v2(self, errors: list[str]) -> None:
+        if await self._reject_integrity_errors(errors):
+            return
         project = self._project()
         workflow = project["workflow"]
         phase = self._current_phase(workflow)
@@ -3094,6 +3140,9 @@ class TaskRuntime:
         if not phase or not card or not repairable:
             await self._wait_with_errors(errors)
             return
+        if self._current_runtime_limit() == 0:
+            await self._wait_with_errors(["performance_budget: Spike compute budget exhausted", *errors])
+            return
         repairs = int(phase.get("local_repair_attempts") or 0)
         if repairs >= MAX_SPIKE_REPAIRS:
             await self._wait_with_errors([
@@ -3105,6 +3154,7 @@ class TaskRuntime:
         phase["started_at"] = _now()
         phase["last_error"] = "; ".join(errors)[:2000]
         workflow["mode"] = "feasibility_spike"
+        workflow["spike_repair_active"] = True
         workflow["stage_snapshot"] = workspace_hashes(self.workspace)
         project["status"] = "running"
         self._save_project(project)
@@ -3227,6 +3277,7 @@ class TaskRuntime:
             workflow["supplemental_spike"] = True
             workflow["supplemental_spike_ids"] = review["supplemental_spike_ids"]
             workflow["spike_elapsed_seconds"] = 0.0
+            workflow["spike_repair_active"] = False
             spike_phase = next(item for item in workflow["phases"] if item["id"] == f"spike:{card['problem_id']}")
             spike_phase.update({"status": "running", "attempts": int(spike_phase.get("attempts") or 1) + 1, "started_at": _now()})
             phase["status"] = "pending"
@@ -3276,6 +3327,20 @@ class TaskRuntime:
             self._save_ledger(ledger)
         await self._restart_v3_problem_planning(project, review)
 
+    async def _repair_paper_plan(self, project: dict[str, Any], errors: list[str]) -> None:
+        if await self._reject_integrity_errors(errors):
+            return
+        workflow = project["workflow"]
+        phase = self._current_phase(workflow)
+        if not phase or int(phase.get("attempts") or 1) >= 2:
+            await self._wait_with_errors(errors)
+            return
+        phase["attempts"] = 2
+        phase["last_error"] = "; ".join(errors)[:2000]
+        workflow["mode"] = "paper_plan_repair"
+        self._save_project(project)
+        await self.prompt(self._resume_prompt(project))
+
     async def _settled_v3(self, project: dict[str, Any]) -> None:
         workflow = project["workflow"]
         mode = str(workflow.get("mode") or "")
@@ -3293,6 +3358,22 @@ class TaskRuntime:
             await self._finish_document_review(project)
             return
         errors, artifact = self._gate_current(project)
+        if await self._reject_integrity_errors(errors):
+            return
+        if stage == "writing" and not errors:
+            cancelled = threading.Event()
+            self._host_render_cancel = cancelled
+            try:
+                workflow["paper_visual_evidence"] = await asyncio.to_thread(
+                    render_paper_pages, self.workspace, _paper_pdf(self.workspace),
+                    cancelled=cancelled.is_set,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                errors.append(f"paper_visual: Host rendering failed: {exc}")
+            finally:
+                self._host_render_cancel = None
+            if cancelled.is_set() or self.status not in {"starting", "running"}:
+                return
         if stage == "inventory":
             if errors:
                 await self._retry_local_artifact_v3(
@@ -3329,14 +3410,7 @@ class TaskRuntime:
                     await self._start_scientific_review(project, problem)
             return
         if stage == "paper_planning" and errors:
-            phase = self._current_phase(workflow)
-            if phase and int(phase.get("attempts") or 1) < 2:
-                phase["attempts"] = 2
-                workflow["mode"] = "paper_plan_repair"
-                self._save_project(project)
-                await self.prompt(paper_plan_repair_prompt(errors))
-            else:
-                await self._wait_with_errors(errors)
+            await self._repair_paper_plan(project, errors)
             return
         if errors:
             await self._repair_current(errors)
@@ -3383,14 +3457,7 @@ class TaskRuntime:
                     await self._start_scientific_review(project, problem)
             return
         if stage == "paper_planning" and errors:
-            phase = self._current_phase(workflow)
-            if phase and int(phase.get("attempts") or 1) < 2:
-                phase["attempts"] = 2
-                workflow["mode"] = "paper_plan_repair"
-                self._save_project(project)
-                await self.prompt(paper_plan_repair_prompt(errors))
-            else:
-                await self._wait_with_errors(errors)
+            await self._repair_paper_plan(project, errors)
             return
         if errors:
             await self._repair_current(errors)
@@ -3755,6 +3822,7 @@ async def task_status(task_id: str, request: Request) -> dict[str, Any]:
                 "status": str(item.get("status") or "pending"),
                 "attempts": int(item.get("attempts") or 0),
                 "local_repair_attempts": int(item.get("local_repair_attempts") or 0),
+                "candidate_repair_attempts": int(item.get("candidate_repair_attempts") or 0),
                 "protocol_attempts": int(item.get("protocol_attempts") or 0),
                 "review_attempts": int(item.get("review_attempts") or 0),
                 "replan_attempts": int(item.get("replan_attempts") or 0),

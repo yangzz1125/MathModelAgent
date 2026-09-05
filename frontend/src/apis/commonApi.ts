@@ -71,6 +71,8 @@ export function getTaskStatus(task_id: string) {
 				| "waiting"
 				| "failed";
 			attempts?: number;
+			candidate_repair_attempts?: number;
+			local_repair_attempts?: number;
 			protocol_attempts?: number;
 			review_attempts?: number;
 			replan_attempts?: number;
