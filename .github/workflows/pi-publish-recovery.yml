@@ -1,0 +1,53 @@
+name: Recover staged Pi refactor
+on:
+  push:
+    branches: [pi-reliability-efficiency-refactor]
+    paths: [.github/workflows/pi-publish-recovery.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recover already uploaded immutable objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request, urllib.error
+          shas = ['ed1a118f7451e3263c183057e18500cc34a917b6','7b53e0c11b392ad6e7031c6ea6b325ad2b5bf7c0','512bfde7a553a50040de1ebe84ea875a6d7e47c0','9dae88096bdbeae33d069e2de154ca04b359b578','62a1c4a28512cab3377ffec976bd38a23df9dbde','c4036e1c7ee743a0199bb6e675f021d2801931a9','c0ee5b51ee8714eac7bbcfb5c4e006369d07e06c']
+          out = pathlib.Path('recovered'); out.mkdir()
+          chunks = []
+          for i, sha in enumerate(shas):
+              request = urllib.request.Request(f'https://api.github.com/repos/yangzz1125/MathModelAgent/git/blobs/{sha}', headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response: data = json.load(response)
+              except urllib.error.HTTPError as exc:
+                  if exc.code != 404: raise
+                  print('Not uploaded:', i, sha); break
+              content = base64.b64decode(data['content'])
+              if hashlib.sha1(f'blob {len(content)}\0'.encode()+content).hexdigest() != sha: raise RuntimeError('Blob hash mismatch')
+              (out/f'{i:02}.bin').write_bytes(content); chunks.append(content)
+          decoder = lzma.LZMADecompressor()
+          patch = decoder.decompress(b''.join(chunks))
+          (out/'recovered.patch').write_bytes(patch)
+          (out/'recovery.json').write_text(json.dumps({'chunks':len(chunks),'complete':decoder.eof,'bytes':len(patch),'sha256':hashlib.sha256(patch).hexdigest()},indent=2))
+          print((out/'recovery.json').read_text())
+          blocks = patch.split(b'diff --git ')
+          for count in range(len(blocks), 1, -1):
+              candidate = b'diff --git '.join(blocks[:count])
+              result = subprocess.run(['git','apply','--check','-'], input=candidate, capture_output=True)
+              if result.returncode == 0:
+                  (out/'complete-files.patch').write_bytes(candidate)
+                  print('Complete-file prefix:', len(candidate), 'bytes'); break
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-staged-refactor-recovered
+          path: recovered/
+          retention-days: 7
+          if-no-files-found: error
