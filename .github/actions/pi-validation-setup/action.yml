@@ -33,15 +33,24 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends poppler-utils
-    - name: Poppler on Windows
+    - name: Verified Poppler binaries on Windows
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        choco install poppler -y --no-progress --limit-output
-        if ($LASTEXITCODE -ne 0) { throw 'Poppler installation failed' }
-        $exe = Get-ChildItem C:\ProgramData\chocolatey\lib -Filter pdfinfo.exe -Recurse | Select-Object -First 1
-        if (-not $exe) { throw 'pdfinfo.exe not found' }
-        $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        $zip = Join-Path $env:RUNNER_TEMP 'poppler-windows.zip'
+        $target = Join-Path $env:RUNNER_TEMP 'poppler-26.07.0-0'
+        Invoke-WebRequest 'https://github.com/oschwartz10612/poppler-windows/releases/download/v26.07.0-0/Release-26.07.0-0.zip' -OutFile $zip -TimeoutSec 90
+        $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne 'a711b0563b06edc488583d28198b6734c5a494afbbd1b9d87d3d2866062fb7e2') { throw 'Poppler archive hash mismatch' }
+        Expand-Archive -LiteralPath $zip -DestinationPath $target -Force
+        $exe = Get-ChildItem $target -Filter pdfinfo.exe -File -Recurse | Select-Object -First 1
+        if (-not $exe) { throw 'pdfinfo.exe not present in binary archive' }
+        $bin = $exe.DirectoryName
+        $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        & "$bin/pdfinfo.exe" -v
+        if ($LASTEXITCODE -ne 0) { throw 'pdfinfo executable validation failed' }
+        & "$bin/pdftoppm.exe" -v
+        if ($LASTEXITCODE -ne 0) { throw 'pdftoppm executable validation failed' }
     - name: Install and verify font and document tools
       shell: bash
       run: python .github/scripts/ci_font.py
