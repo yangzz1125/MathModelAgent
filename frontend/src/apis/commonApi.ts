@@ -87,6 +87,20 @@ export function getTaskStatus(task_id: string) {
 	}>(`/task/${task_id}/status`);
 }
 
+export interface TaskSummary {
+	task_id: string;
+	title: string;
+	status: string;
+	created_at: string;
+	current_stage: string;
+	continued_from: string;
+}
+
+/** 从服务端持久化工作区读取历史任务。 */
+export function getTaskHistory() {
+	return request.get<TaskSummary[]>("/projects");
+}
+
 /** 获取任务的历史消息 */
 export function getTaskMessages(task_id: string) {
 	return request.get<Message[]>("/messages", {

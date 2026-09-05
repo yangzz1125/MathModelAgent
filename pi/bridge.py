@@ -3650,6 +3650,37 @@ async def available_models() -> dict[str, Any]:
     }
 
 
+@app.get("/projects")
+async def list_projects() -> list[dict[str, Any]]:
+    def summaries() -> list[dict[str, Any]]:
+        projects = []
+        for path in WORKSPACES.glob("*/project.json"):
+            if not TASK_ID_RE.fullmatch(path.parent.name) or path.parent.is_symlink():
+                continue
+            try:
+                project = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(project, dict):
+                    continue
+                workflow = project.get("workflow") or {}
+                continuation = project.get("continuation_source") or {}
+                if not isinstance(workflow, dict) or not isinstance(continuation, dict):
+                    continue
+                projects.append({
+                    "task_id": path.parent.name,
+                    "title": str(project.get("source_folder") or project.get("problem_file") or path.parent.name),
+                    "status": str(project.get("status") or "stopped"),
+                    "created_at": str(project.get("created_at") or project.get("started_at") or ""),
+                    "current_stage": str(workflow.get("current") or ""),
+                    "continued_from": str(continuation.get("project_id") or ""),
+                })
+            except (OSError, ValueError):
+                continue
+        return sorted(projects, key=lambda item: (item["created_at"], item["task_id"]), reverse=True)
+
+    # Discovery reads metadata only: no runtime recovery, messages, or state changes.
+    return await asyncio.to_thread(summaries)
+
+
 @app.post("/projects/init")
 async def initialize_project(
     ques_all: str = Form(""),

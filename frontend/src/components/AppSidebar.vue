@@ -8,6 +8,10 @@ import {
 	XHS,
 } from "@/utils/const";
 import NavUser from "./NavUser.vue";
+import { getTaskHistory, type TaskSummary } from "@/apis/commonApi";
+import { Plus, RefreshCw } from "lucide-vue-next";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import { useRoute } from "vue-router";
 
 import {
 	Sidebar,
@@ -30,27 +34,43 @@ const props = defineProps<SidebarProps>();
 
 // ---- Reactive State ----
 
-/** 导航菜单数据 */
-const data = {
-	navMain: [
-		{
-			title: "开始",
-			url: "#",
-			items: [
-				{
-					title: "开始新任务",
-					url: "#",
-					isActive: false,
-				},
-			],
-		},
-		{
-			title: "历史任务",
-			url: "#",
-			items: [],
-		},
-	],
+const route = useRoute();
+const history = ref<TaskSummary[]>([]);
+const loading = ref(false);
+const loaded = ref(false);
+const loadError = ref(false);
+let timer: ReturnType<typeof setInterval> | undefined;
+let disposed = false;
+const statusLabels: Record<string, string> = {
+	ready: "待启动", starting: "启动中", running: "运行中", paused: "已暂停",
+	completed: "已完成", failed: "失败", cancelled: "已取消", waiting: "等待中", stopped: "已停止",
 };
+
+async function loadHistory() {
+	if (loading.value) return;
+	loading.value = true;
+	try {
+		const response = await getTaskHistory();
+		if (!disposed) {
+			history.value = response.data;
+			loaded.value = true;
+			loadError.value = false;
+		}
+	} catch {
+		if (!disposed) loadError.value = true;
+	} finally {
+		loading.value = false;
+	}
+}
+
+onMounted(() => {
+	void loadHistory();
+	timer = setInterval(loadHistory, 15000);
+});
+onBeforeUnmount(() => {
+	disposed = true;
+	clearInterval(timer);
+});
 
 const socialMedia = [
 	{
@@ -98,13 +118,43 @@ const socialMedia = [
       </div>
     </SidebarHeader>
     <SidebarContent>
-      <SidebarGroup v-for="item in data.navMain" :key="item.title">
-        <SidebarGroupLabel>{{ item.title }}</SidebarGroupLabel>
+      <SidebarGroup>
+        <SidebarGroupLabel>开始</SidebarGroupLabel>
         <SidebarGroupContent>
           <SidebarMenu>
-            <SidebarMenuItem v-for="childItem in item.items" :key="childItem.title">
-              <SidebarMenuButton as-child :is-active="childItem.isActive">
-                <a :href="childItem.url">{{ childItem.title }}</a>
+            <SidebarMenuItem>
+              <SidebarMenuButton as-child :is-active="route.path === '/chat'">
+                <router-link to="/chat"><Plus class="h-4 w-4" /><span>开始新任务</span></router-link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarGroupContent>
+      </SidebarGroup>
+      <SidebarGroup>
+        <div class="flex items-center justify-between">
+          <SidebarGroupLabel>历史任务<span v-if="loaded" class="ml-1">({{ history.length }})</span></SidebarGroupLabel>
+          <button type="button" aria-label="刷新历史任务" title="刷新历史任务" :disabled="loading"
+            class="flex h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-sidebar-accent disabled:opacity-50"
+            @click="loadHistory">
+            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
+          </button>
+        </div>
+        <SidebarGroupContent>
+          <p v-if="loadError" role="alert" class="px-2 py-2 text-xs text-red-600">历史任务加载失败</p>
+          <p v-else-if="!loaded" role="status" class="px-2 py-2 text-xs text-muted-foreground">加载中…</p>
+          <p v-else-if="history.length === 0" class="px-2 py-2 text-xs text-muted-foreground">暂无历史任务</p>
+          <SidebarMenu>
+            <SidebarMenuItem v-for="task in history" :key="task.task_id">
+              <SidebarMenuButton as-child class="h-auto py-2" :is-active="route.params.task_id === task.task_id">
+                <router-link :to="`/task/${task.task_id}`" :title="`${task.title} · ${task.task_id}`">
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm">{{ task.continued_from ? '续跑 · ' : '' }}{{ task.title }}</span>
+                    <span class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span class="truncate font-mono">{{ task.task_id }}</span>
+                      <span class="shrink-0" :class="{ 'text-green-700': task.status === 'completed', 'text-red-600': task.status === 'failed', 'text-blue-600': task.status === 'running' }">{{ statusLabels[task.status] || task.status }}</span>
+                    </span>
+                  </span>
+                </router-link>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
