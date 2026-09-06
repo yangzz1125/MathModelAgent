@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from starlette.websockets import WebSocketDisconnect
 
 from pi.figure_quality import figure_stack_errors
+from pi.delivery_package import DeliveryPackageError, build_delivery_package
 from pi.paper_evidence import paper_visual_errors, render_paper_pages
 from pi.scientific_review import (
     ScientificContractError,
@@ -1272,13 +1273,17 @@ class TaskRuntime(EfficientWorkflowMixin, RuntimeSupervisionMixin):
         await self.system("正在从持久化阶段恢复任务")
         self.runner = asyncio.create_task(self.run(prompt))
 
-    async def abort(self) -> None:
+    async def abort(self) -> bool:
         async with self._control_lock:
+            # Recovery may have finalized while cancellation waited for this lock.
+            if self.status not in {"starting", "running", "waiting", "paused"}:
+                return False
             self._stopping = True
             await self._quiesce_transitions()
             self.set_status("cancelled")
             await self.system("任务已停止", "warning")
             await self._stop_runtime()
+            return True
 
     async def _run_core(self, prompt: str) -> None:
         """Spawn Pi, send the workflow prompt, and translate RPC events."""
@@ -3888,10 +3893,10 @@ async def task_messages(task_id: str) -> list[dict[str, Any]]:
 def _freeform_prompt_allowed(runtime: "TaskRuntime") -> bool:
     try:
         workflow = runtime._project().get("workflow")
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
     return not (
-        isinstance(workflow, dict) and workflow.get("contract_version") == 3
+        isinstance(workflow, dict) and workflow.get("contract_version") in {3, 4}
     )
 
 
@@ -3915,7 +3920,7 @@ async def task_socket(websocket: WebSocket, task_id: str) -> None:
             if not _freeform_prompt_allowed(runtime):
                 runtime._safety_fanout().offer(websocket, _message(
                     "system",
-                    "Contract-v3 自治任务不接受自由指令，请使用暂停、恢复或取消控制。",
+                    "自治工作流不接受自由指令，请使用暂停、恢复或取消控制。",
                     type="warning",
                 ))
                 continue
@@ -3949,7 +3954,8 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     runtime = _runtime(task_id)
     if runtime.status not in {"starting", "running", "waiting", "paused"}:
         return {"success": False, "message": "Task is not running"}
-    await runtime.abort()
+    if not await runtime.abort():
+        return {"success": False, "message": "Task is not running"}
     return {"success": True, "message": "Stop request sent"}
 
 
@@ -4081,6 +4087,24 @@ async def download_all_url(task_id: str, request: Request) -> dict[str, str]:
     _task_workspace(task_id)
     base = str(request.base_url).rstrip("/")
     return {"download_url": f"{base}/download_all?task_id={task_id}"}
+
+
+@app.get("/delivery_package")
+async def delivery_package(task_id: str) -> FileResponse:
+    workspace = _task_workspace(task_id)
+    archive = workspace / ".pi-bridge" / f"{task_id}-delivery.zip"
+    try:
+        await asyncio.to_thread(build_delivery_package, workspace, task_id, archive)
+    except DeliveryPackageError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FileResponse(archive, filename=f"MathModelAgent-{task_id}-delivery.zip")
+
+
+@app.get("/delivery_package_url")
+async def delivery_package_url(task_id: str, request: Request) -> dict[str, str]:
+    _task_workspace(task_id)
+    base = str(request.base_url).rstrip("/")
+    return {"download_url": f"{base}/delivery_package?task_id={task_id}"}
 
 
 @app.get("/open_folder")

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
 	getAllFilesDownloadUrl,
+	getDeliveryPackageUrl,
 	getFileDownloadUrl,
 	getFiles,
 } from "@/apis/filesApi";
@@ -27,6 +28,7 @@ import {
 	File,
 	FileText,
 	Files,
+	PackageCheck,
 	RefreshCw,
 } from "lucide-vue-next";
 import { ref } from "vue";
@@ -60,6 +62,9 @@ const downloadingFile = ref<string | null>(null);
 
 /** 是否正在下载全部文件 */
 const downloadingAll = ref(false);
+
+/** 是否正在生成正式交付包 */
+const packaging = ref(false);
 
 // ---- Methods ----
 
@@ -185,6 +190,35 @@ const downloadAll = async () => {
 		downloadingAll.value = false;
 	}
 };
+
+/** 生成并下载经过验收的正式交付包 */
+const downloadPackage = async () => {
+	try {
+		packaging.value = true;
+		const res = await getDeliveryPackageUrl(taskId as string);
+		if (!res.data?.download_url) throw new Error("获取交付包链接失败");
+		const link = document.createElement("a");
+		link.href = res.data.download_url;
+		link.download = `MathModelAgent-${taskId}-delivery.zip`;
+		link.target = "_blank";
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+		toast({
+			title: "开始生成交付包",
+			description: "验收通过后将下载 PDF、源码、代码、数据和图表",
+		});
+	} catch (error) {
+		console.error("生成交付包失败:", error);
+		toast({
+			title: "打包失败",
+			description: "任务尚未完成验收或交付文件不完整",
+			variant: "destructive",
+		});
+	} finally {
+		packaging.value = false;
+	}
+};
 </script>
 
 <template>
@@ -209,10 +243,16 @@ const downloadAll = async () => {
       <SheetHeader>
         <SheetTitle class="flex items-center justify-between mr-5">
           <span>工作区文件</span>
-          <Button size="icon" variant="ghost" :disabled="downloadingAll" @click="downloadAll" title="下载全部文件">
-            <RefreshCw v-if="downloadingAll" class="h-4 w-4 animate-spin" />
-            <Archive v-else class="h-4 w-4" />
-          </Button>
+          <div class="flex items-center gap-1">
+            <Button size="icon" variant="ghost" :disabled="packaging" @click="downloadPackage" title="下载正式交付包">
+              <RefreshCw v-if="packaging" class="h-4 w-4 animate-spin" />
+              <PackageCheck v-else class="h-4 w-4" />
+            </Button>
+            <Button size="icon" variant="ghost" :disabled="downloadingAll" @click="downloadAll" title="下载全部工作区文件">
+              <RefreshCw v-if="downloadingAll" class="h-4 w-4 animate-spin" />
+              <Archive v-else class="h-4 w-4" />
+            </Button>
+          </div>
         </SheetTitle>
         <SheetDescription>
           任务产物保存在 <span class="font-mono">E:\MathModelAgentPi\workspaces\{{ taskId }}</span>

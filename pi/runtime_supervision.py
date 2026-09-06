@@ -24,7 +24,7 @@ from pi.runtime_support import (
 ACTIVE = {"starting", "running"}
 TERMINAL = {"completed", "cancelled", "failed", "paused", "partial", "completed_with_warnings"}
 NON_RETRYABLE = (
-    "budget_exhausted", "artifact_changed:", "scientific_acceptance:",
+    "budget_exhausted", "artifact_changed:", "scientific_acceptance:", "provider_error:",
     "unauthorized", "invalid api key", "authentication", "permission denied", "missing credentials", "no api key",
 )
 
@@ -44,8 +44,10 @@ class RuntimeState:
     checkpoint_at: float = 0.0
     exit_error: str = ""
     cleanup_required: bool = False
+    host_cleanup_error: Any = None
     recovery_pending: bool = False
     provider_message_open: bool = False
+    provider_error: str = ""
     posix_pgid: int | None = None
     log_task: asyncio.Task[Any] | None = None
     log_dirty: bool = False
@@ -204,6 +206,7 @@ class RuntimeSupervisionMixin:
         seconds = state.policy.review_seconds if self._reviewer_capability(workflow) else state.policy.turn_seconds
         request_id = uuid.uuid4().hex
         state.turn = TurnLease(request_id, now, seconds)
+        state.provider_error = ""
         state.transition_started = None
         self._last_assistant_text = ""
         self.set_status("running")
@@ -241,6 +244,11 @@ class RuntimeSupervisionMixin:
             turn.settled = True
             state.transition_started = now
             state.ledger.tick(now, self._safety_stage())
+            if state.provider_error:
+                # Pi already exhausted its own provider retries. This is not a
+                # successful handoff or a malformed scientific verdict.
+                self._request_runtime_recovery("provider_error: " + state.provider_error)
+                return
             if state.recovery_pending:
                 state.ledger.recovered_turns += 1
                 state.recovery_pending = False
@@ -257,6 +265,11 @@ class RuntimeSupervisionMixin:
             if isinstance(message, dict) and message.get("role") == "assistant":
                 state.ledger.record_usage(message)
                 state.provider_message_open = False
+                state.provider_error = (
+                    str(message.get("errorMessage") or message.get("stopReason"))[:2000]
+                    if message.get("stopReason") in {"error", "aborted"} or message.get("errorMessage")
+                    else ""
+                )
         await self._handle_event_core(event)
         if kind == "message_end" and self._reviewer_capability(self._project().get("workflow") or {}):
             normalized = normalize_json_envelope(self._last_assistant_text)
@@ -358,6 +371,7 @@ class RuntimeSupervisionMixin:
 
     async def _recover_runtime(self, error: str, epoch: int, *, closed: bool = False) -> None:
         state = self._safety_state()
+        cleanup_confirmed = False
         try:
             async with self._control_lock:
                 if epoch != state.epoch or self._stopping or self.status == "cancelled":
@@ -393,6 +407,17 @@ class RuntimeSupervisionMixin:
                     await self._stop_runtime()
                 if state.cleanup_required:
                     raise RuntimeError("cleanup is unconfirmed")
+                cleanup_confirmed = True
+                if self.status != "paused" and (retry or not state.policy.auto_recover):
+                    project = self._project()
+                    project.update(status="paused", paused_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                   pause_reason="runtime_recovery: " + error[:1000])
+                    phase = self._current_phase(project.get("workflow") or {})
+                    if phase is not None:
+                        phase["status_before_pause"] = phase.get("status") or "running"
+                        phase["status"] = "paused"
+                    self.status = "paused"
+                    self._save_project(project)
                 if not state.policy.auto_recover:
                     return  # explicit operator mode: remain paused
                 if not retry:
@@ -405,7 +430,8 @@ class RuntimeSupervisionMixin:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            state.cleanup_required = True
+            if not cleanup_confirmed:
+                state.cleanup_required = True
             self._stopping = True
             self.status = "failed"
             with contextlib.suppress(Exception):
@@ -415,7 +441,8 @@ class RuntimeSupervisionMixin:
             with contextlib.suppress(Exception):
                 project = self._project()
                 project["status"] = "failed"
-                project["runtime_failure"] = f"cleanup_or_resume_unconfirmed: {exc}"
+                prefix = "cleanup_or_resume_unconfirmed" if state.cleanup_required else "resume_failed"
+                project["runtime_failure"] = f"{prefix}: {exc}"
                 self._save_project(project)
 
     def _mark_cleanup_unconfirmed(self, reason: str) -> None:
@@ -439,6 +466,8 @@ class RuntimeSupervisionMixin:
             if task is not asyncio.current_task() and not task.done()
         }
         if not tasks:
+            if state.cleanup_required:
+                raise RuntimeError("Host cleanup is unconfirmed; resume is blocked")
             return
         if rendering is not None:
             # Do not cancel a coroutine wrapping to_thread(render): cancellation
@@ -448,6 +477,8 @@ class RuntimeSupervisionMixin:
             for task in tasks:
                 task.cancel()
             pending = await bounded_wait(tasks, state.policy.cleanup_seconds if getattr(self, "_host_job_active", False) else state.policy.cancel_seconds)
+        if state.cleanup_required:
+            raise RuntimeError("Host cleanup is unconfirmed; resume is blocked")
         if pending:
             self._mark_cleanup_unconfirmed("Transition cleanup did not finish; automatic resume is blocked")
             raise RuntimeError("Transition cleanup did not finish; automatic resume is blocked")
@@ -468,8 +499,14 @@ class RuntimeSupervisionMixin:
         self._pending_rpc.clear()
         try:
             try:
-                await self._terminate_process_core()
+                if state.host_cleanup_error is not None:
+                    from pi.compute_jobs import _cleanup_job
+                    held = state.host_cleanup_error
+                    await _cleanup_job(held.process, held.job)
+                    state.host_cleanup_error = None
+                    # A successful later teardown does not silently clear the durable fence.
             finally:
+                await self._terminate_process_core()
                 if state.posix_pgid is not None:
                     await stop_remaining_process_group(state.posix_pgid, state.policy.cleanup_seconds)
                     state.posix_pgid = None

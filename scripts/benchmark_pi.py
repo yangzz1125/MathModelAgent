@@ -85,7 +85,23 @@ def main():
                 record.update(execution_status='failed',error=str(exc)[:1500])
             finally:
                 if task and not terminal_observed:
-                    with contextlib.suppress(httpx.HTTPError): client.post(f'/task/{task}/cancel').raise_for_status()
+                    try:
+                        response = client.post(f'/modeling/{task}/cancel')
+                        response.raise_for_status()
+                        final = client.get(f'/task/{task}/status')
+                        final.raise_for_status()
+                        state = final.json()
+                        record.update(execution_status=state['status'],
+                                      delivery_status=state.get('delivery_status'),
+                                      runtime_metrics=state.get('runtime_metrics', {}))
+                        record['cleanup_confirmed'] = (
+                            state['status'] in terminal
+                            and not state.get('runtime_metrics', {}).get('cleanup_required', False)
+                        )
+                        if not record['cleanup_confirmed']:
+                            record['cleanup_error'] = 'Task did not reach a confirmed terminal state'
+                    except (httpx.HTTPError, ValueError, KeyError) as exc:
+                        record.update(cleanup_confirmed=False, cleanup_error=str(exc)[:1500])
                 record['elapsed_seconds']=round(time.monotonic()-started,3)
                 log.write(json.dumps(record,allow_nan=False)+'\n');log.flush();os.fsync(log.fileno())
                 print(record['case_id'],record['execution_status'])

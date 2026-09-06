@@ -5,6 +5,7 @@ outcomes. Legacy v1-v3 remain on their original engine. This is not a sandbox.
 """
 from __future__ import annotations
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -15,7 +16,7 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
-from pi.compute_jobs import hashes, run_job, safe_path, unchanged
+from pi.compute_jobs import HostCleanupError, hashes, run_job, safe_path, unchanged
 from pi.efficient_contract import load_object, plan_contract, result_contract, review_contract, strings
 
 TERMINAL = {'completed','completed_with_warnings','partial','failed','cancelled','paused'}
@@ -53,6 +54,8 @@ class EfficientWorkflowMixin:
         return next((p for p in w['plan'] if p['id']==pid),None)
 
     def _v4_profile(self,w):
+        if w['mode']=='document_review' and 'document_reviewer' in w['profiles']:
+            return 'document_reviewer'
         return 'planner' if w['mode'] in {'plan','scientific_review','document_review'} else 'worker'
 
     def _v4_prompt(self,project):
@@ -80,9 +83,12 @@ class EfficientWorkflowMixin:
                 'assessment and fallback are internal planning, not separate mandatory stages. '
                 'Prefer a reliable baseline over a fragile elaborate model.')
         if mode=='solve':
-            pid=p['id']; fallback=self._v4_phase(w)['attempts']>=3
+            pid=p['id']; fallback=self._v4_phase(w)['attempts']>=3 and not w.get('candidate_continuation')
             deps={d:w['outcomes'][d] for d in p['depends_on']}
             return prefix+json.dumps(p,ensure_ascii=False)+'\n'+(
+                ('Continue the existing candidate. Read its code and recorded feedback, make targeted corrections only. '
+                 'Do not restart planning, replace the working method, or write the manuscript in solve.py. '
+                 'Host will rerun changed code and retain unchanged evidence.\n' if w.get('candidate_continuation') else '')+
                 ('Use the FALLBACK now; do not repeat the failed method.\n' if fallback else '')+
                 f'Accepted dependencies: {json.dumps(deps,ensure_ascii=False)}\n'
                 f'Only write code/{pid}/, results/{pid}/, figures/{pid}/. '
@@ -285,6 +291,11 @@ class EfficientWorkflowMixin:
                 self._v4_check_scope(w); w['paper_build']=records; phase['status']='completed'
                 w.update(current='verify',mode='document_review')
                 self._save_project(project); await self._v4_begin()
+        except HostCleanupError as exc:
+            self._safety_state().host_cleanup_error = exc
+            self._mark_cleanup_unconfirmed(str(exc))
+            with contextlib.suppress(Exception):
+                await self.terminate()
         except (ValueError,OSError,KeyError,TypeError) as exc:
             if 'artifact_changed:' in str(exc): await self._v4_finish(str(exc),integrity=True)
             elif not self._stopping: await self._v4_repair(str(exc))
@@ -313,6 +324,8 @@ class EfficientWorkflowMixin:
             elif w['mode']=='document_review': await self._v4_finish('Document review unavailable; paper is unverified')
             else: await self._v4_skip('Independent review unavailable; result remains unverified')
             return
+        w['last_review']=review
+        self._save_project(project)
         if review['verdict']!='accept':
             await self._v4_repair('Review: '+review['reason']+'; '+'; '.join(review['issues'])); return
         w['warnings'].extend(review['warnings']); phase['review_status']='accepted'
@@ -376,10 +389,12 @@ class EfficientWorkflowMixin:
 
     async def _finalize_runtime_failure(self,error):
         project=self._project(); w=project.get('workflow') or {}
+        project['runtime_failure']=error[:2000]
+        self._save_project(project)
         if w.get('contract_version')!=4:
             return await super()._finalize_runtime_failure(error)
         # Called only after the previous process and Host operations are stopped.
-        global_error=any(t in error.lower() for t in ('task_budget','task_prompt_budget','artifact_changed','authentication','invalid api key','missing credentials','no api key','unauthorized','permission denied','cleanup'))
+        global_error=any(t in error.lower() for t in ('task_budget','task_prompt_budget','artifact_changed','authentication','invalid api key','missing credentials','no api key','unauthorized','permission denied','cleanup','provider_error:'))
         if self._v4_problem(w) and not global_error:
             await self._v4_skip(error,start=False)
             if self.status not in {'failed','partial','completed','completed_with_warnings'}:

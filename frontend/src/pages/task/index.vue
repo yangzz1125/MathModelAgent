@@ -117,7 +117,6 @@ async function refreshStatus() {
 
 onMounted(async () => {
 	taskStore.connectWebSocket(props.task_id);
-	void taskStore.loadTaskMessages(props.task_id);
 	void refreshStatus();
 	timer = setInterval(() => {
 		updateDuration();

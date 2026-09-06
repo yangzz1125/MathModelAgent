@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 
 
+class HostCleanupError(RuntimeError):
+    """Retain native ownership until the Host can confirm cleanup."""
+    def __init__(self, process, job, cause):
+        super().__init__('Host process cleanup unconfirmed: ' + str(cause))
+        self.process = process
+        self.job = job
+
+
 @dataclass
 class JobResult:
     argv: list[str]
@@ -51,8 +59,6 @@ def hashes(root: Path, directories: tuple[str, ...] | list[str]) -> dict[str, st
     for relative in directories:
         base = safe_path(root, relative)
         for path in sorted(base.rglob('*')) if base.is_dir() else [base]:
-            if '__pycache__' in path.parts or path.suffix == '.pyc':
-                continue
             if path.is_symlink():
                 raise ValueError('artifact_changed: symlink in evidence tree')
             if not path.is_file():
@@ -72,7 +78,10 @@ def unchanged(root: Path, expected: dict[str, str]) -> bool:
 
 async def _stop_tree(process: asyncio.subprocess.Process, job=None) -> None:
     if job is not None:
+        assigned = job.job_assigned
         job.terminate_job()
+        if not assigned and process.returncode is None:
+            process.kill()  # Assignment failed while the child was suspended.
     elif os.name == 'nt':
         if process.returncode is None:
             killer = await asyncio.create_subprocess_exec(
@@ -80,6 +89,8 @@ async def _stop_tree(process: asyncio.subprocess.Process, job=None) -> None:
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             try:
                 await asyncio.wait_for(killer.wait(), 5)
+                if killer.returncode and process.returncode is None:
+                    raise RuntimeError('Host process-tree cleanup unconfirmed')
             except asyncio.TimeoutError:
                 killer.kill()
                 await asyncio.wait_for(killer.wait(), 2)
@@ -90,6 +101,13 @@ async def _stop_tree(process: asyncio.subprocess.Process, job=None) -> None:
             os.killpg(process.pid, signal.SIGKILL)
     if process.returncode is None:
         await asyncio.wait_for(process.wait(), 5)
+
+
+async def _cleanup_job(process, job):
+    try:
+        await _stop_tree(process, job)
+    except Exception as exc:
+        raise HostCleanupError(process, job, exc) from exc
 
 
 async def run_job(argv: list[str], cwd: Path, *, seconds: float,
@@ -110,17 +128,6 @@ async def run_job(argv: list[str], cwd: Path, *, seconds: float,
         start_new_session=(os.name != 'nt'),
         creationflags=(0x08000000 | 0x00000004) if os.name == 'nt' else 0)
     job = None
-    if os.name == 'nt':
-        from pi.windows_host import WindowsHostBoundary
-        job = WindowsHostBoundary('host-compute', cwd)
-        try:
-            job.assign_and_resume(process.pid)
-        except BaseException:
-            if process.returncode is None:
-                process.kill()
-                await asyncio.wait_for(process.wait(), 5)
-            job.terminate_job()
-            raise
     output = bytearray()
     total = 0
     async def drain():
@@ -133,18 +140,28 @@ async def run_job(argv: list[str], cwd: Path, *, seconds: float,
     reader = asyncio.create_task(drain())
     timed_out = False
     try:
+        if os.name == 'nt':
+            from pi.windows_host import WindowsHostBoundary
+            job = WindowsHostBoundary('host-compute', cwd)
+            job.assign_and_resume(process.pid)
         async with asyncio.timeout(max(.001, seconds - (time.monotonic() - started))):
             await process.wait()
             await reader
     except TimeoutError:
         timed_out = True
     finally:
-        cleanup = asyncio.create_task(_stop_tree(process, job))
+        cleanup = asyncio.create_task(_cleanup_job(process, job))
+        interrupted = False
         try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await asyncio.shield(cleanup)
-            raise
+            # Repeated pause/cancel requests must not detach native cleanup.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    interrupted = True
+            cleanup.result()
+            if interrupted:
+                raise asyncio.CancelledError
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)

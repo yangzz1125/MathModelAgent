@@ -42,3 +42,10 @@ export async function getAllFilesDownloadUrl(task_id: string) {
 		},
 	});
 }
+
+/** 获取正式交付包下载链接 */
+export async function getDeliveryPackageUrl(task_id: string) {
+	return await request.get<{ download_url: string }>("/delivery_package_url", {
+		params: { task_id },
+	});
+}

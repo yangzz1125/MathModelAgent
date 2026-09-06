@@ -38,6 +38,7 @@ export const useTaskStore = defineStore("task", () => {
 	});
 	/** 已处理的消息ID集合（用于去重） */
 	const positionsByTask = new Map<string, Map<string, number>>();
+	const historyRequests = new Map<string, Map<string, Message>>();
 
 	/** WebSocket 实例 */
 	let ws: TaskWebSocket | null = null;
@@ -105,11 +106,12 @@ export const useTaskStore = defineStore("task", () => {
             positionsByTask.set(taskId, index);
         }
         upsertMessage(rows, index, message);
+        historyRequests.get(taskId)?.set(message.id, message);
     }
 
-    function mergeMessages(taskId: string, incomingMessages: Message[]) {
+    function mergeMessages(taskId: string, incomingMessages: Message[], live: Message[]) {
         ensureTaskBucket(taskId);
-        const rows = mergeHistory(messagesByTask.value[taskId], incomingMessages);
+        const rows = mergeHistory(messagesByTask.value[taskId], incomingMessages, live);
         messagesByTask.value[taskId] = rows;
         positionsByTask.set(taskId, new Map(rows.map((item, i) => [item.id, i])));
     }
@@ -126,6 +128,7 @@ export const useTaskStore = defineStore("task", () => {
 	/** 连接 WebSocket 接收实时消息 */
 	function connectWebSocket(taskId: string) {
 		const generation = ++connectionGeneration;
+		historyRequests.clear();
 		if (ws) {
 			ws.close();
 			ws = null;
@@ -159,6 +162,8 @@ export const useTaskStore = defineStore("task", () => {
 			(status) => {
 				if (generation !== connectionGeneration) return;
 				wsStatus.value = status;
+				if (status === "connected") void loadTaskMessages(taskId);
+				else historyRequests.delete(taskId);
 			},
 		);
 		ws.connect();
@@ -166,20 +171,26 @@ export const useTaskStore = defineStore("task", () => {
 
 	/** 加载任务的历史消息 */
 	async function loadTaskMessages(taskId: string) {
-		setCurrentTask(taskId);
 		ensureTaskBucket(taskId);
+		const generation = connectionGeneration;
+		const live = new Map<string, Message>();
+		historyRequests.set(taskId, live);
 		try {
 			const response = await getTaskMessages(taskId);
+			if (generation !== connectionGeneration || historyRequests.get(taskId) !== live) return;
 			const validMessages = (response.data ?? []).filter(isMessagePayload);
-			mergeMessages(taskId, validMessages);
+			mergeMessages(taskId, validMessages, [...live.values()]);
 		} catch (error) {
 			console.error("加载任务历史消息失败:", error);
+		} finally {
+			if (historyRequests.get(taskId) === live) historyRequests.delete(taskId);
 		}
 	}
 
 	/** 关闭 WebSocket 连接 */
 	function closeWebSocket() {
 		connectionGeneration++;
+		historyRequests.clear();
 		ws?.close();
 		ws = null;
 		wsStatus.value = "disconnected";
