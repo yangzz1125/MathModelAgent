@@ -18,6 +18,16 @@
 
 ---
 
+## 阅读入口
+
+| 目的 | 入口 |
+| --- | --- |
+| 选择 main 或 Pi 开发分支 | [仓库导航](docs/README.md) |
+| 查看本仓库 Pi 集成 | [pi-integration 分支说明](https://github.com/yangzz1125/MathModelAgent/blob/pi-integration/PI.md) |
+| 开发 Web 页面 | [前端说明](frontend/README.md) |
+
+本仓库的 Pi 改动保存在开发分支；下方的桌面版下载和上游介绍继续指向原项目。
+
 ## 🖥️ 桌面版（推荐使用方式）
 
 > **不想折腾环境？直接下载桌面版，开箱即用。**
@@ -228,7 +238,7 @@ Harness SKILL 的优化需要大量黑盒测试和调优.
 下载项目
 
 ```bash
-git clone https://github.com/jihe520/MathModelAgent.git # 克隆项目
+git clone https://github.com/yangzz1125/MathModelAgent.git # 克隆本仓库
 ```
 
 
@@ -380,7 +390,7 @@ Prompt Inject : [prompt](./backend/app/config/md_template.toml)
 
 ## ⚙️ 新功能配置
 
-MathModelAgent 支持以下可选功能，默认已关闭，开启后未配置外部依赖时自动降级跳过。详见 [升级说明](./升级说明.md)。
+MathModelAgent 支持以下可选功能，默认已关闭，开启后未配置外部依赖时自动降级跳过。配置与更新步骤见[升级说明](docs/UPGRADING.md)。
 
 | 功能 | 配置开关 | 说明 |
 |------|----------|------|
@@ -460,4 +470,3 @@ https://linux.do/
 
 > [!CAUTION]
 > 免责声明: 注意，AI 生成仅供参考，目前水平直接参加国赛获奖是不可能的，但我相信 AI 和 该项目未来的成长。
-
